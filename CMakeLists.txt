@@ -65,7 +65,9 @@ add_library(strata
     src/change.c
     src/agent.c
     src/blob.c
+    src/village.c
 )
+target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN)
 target_include_directories(strata PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/vendor/quickjs
@@ -114,6 +116,18 @@ add_test(NAME test_board COMMAND test_board)
 add_executable(test_blob test/test_blob.c)
 target_link_libraries(test_blob strata)
 add_test(NAME test_blob COMMAND test_blob)
+
+add_executable(test_village test/test_village.c $<TARGET_OBJECTS:store_service_lib>)
+target_link_libraries(test_village strata)
+add_test(NAME test_village COMMAND test_village)
+
+# Village daemon
+add_executable(village_daemon src/village.c)
+target_include_directories(village_daemon PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(village_daemon strata)
 
 # Examples
 add_executable(listener examples/listener.c)

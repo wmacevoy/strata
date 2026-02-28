@@ -518,6 +518,8 @@ pid_t strata_agent_spawn(strata_agent_host *host,
     if (pid < 0) { perror("fork"); return -1; }
 
     if (pid == 0) {
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
         if (def->mode == STRATA_MODE_JS)
             js_child_run(def, event_json, event_len);
         else
@@ -535,4 +537,62 @@ int strata_agent_host_reap(strata_agent_host *host) {
     while (waitpid(-1, &status, WNOHANG) > 0)
         count++;
     return count;
+}
+
+const strata_agent_def *strata_agent_host_find(const strata_agent_host *host,
+                                                const char *name) {
+    if (!host || !name) return NULL;
+    for (int i = 0; i < host->agent_count; i++) {
+        if (strcmp(host->agents[i].name, name) == 0)
+            return &host->agents[i];
+    }
+    return NULL;
+}
+
+int strata_agent_register_wasm_buf(strata_agent_host *host,
+                                    const char *name,
+                                    const unsigned char *wasm_buf, size_t wasm_len,
+                                    const char *sub_endpoint,
+                                    const char *req_endpoint) {
+    if (!host || !name || !wasm_buf || host->agent_count >= STRATA_MAX_AGENTS) return -1;
+
+    strata_agent_def *def = &host->agents[host->agent_count];
+    memset(def, 0, sizeof(*def));
+    def->mode = STRATA_MODE_WASM;
+    strncpy(def->name, name, sizeof(def->name) - 1);
+    if (sub_endpoint) strncpy(def->sub_endpoint, sub_endpoint, sizeof(def->sub_endpoint) - 1);
+    if (req_endpoint) strncpy(def->req_endpoint, req_endpoint, sizeof(def->req_endpoint) - 1);
+
+    def->wasm_buf = malloc(wasm_len);
+    if (!def->wasm_buf) return -1;
+    memcpy(def->wasm_buf, wasm_buf, wasm_len);
+    def->wasm_len = wasm_len;
+
+    host->agent_count++;
+    return 0;
+}
+
+int strata_agent_register_js_buf(strata_agent_host *host,
+                                  const char *name,
+                                  const char *js_source,
+                                  const char *sub_endpoint,
+                                  const char *req_endpoint,
+                                  const char *pub_endpoint,
+                                  const char *rep_endpoint) {
+    if (!host || !name || !js_source || host->agent_count >= STRATA_MAX_AGENTS) return -1;
+
+    strata_agent_def *def = &host->agents[host->agent_count];
+    memset(def, 0, sizeof(*def));
+    def->mode = STRATA_MODE_JS;
+    strncpy(def->name, name, sizeof(def->name) - 1);
+    if (sub_endpoint) strncpy(def->sub_endpoint, sub_endpoint, sizeof(def->sub_endpoint) - 1);
+    if (req_endpoint) strncpy(def->req_endpoint, req_endpoint, sizeof(def->req_endpoint) - 1);
+    if (pub_endpoint) strncpy(def->pub_endpoint, pub_endpoint, sizeof(def->pub_endpoint) - 1);
+    if (rep_endpoint) strncpy(def->rep_endpoint, rep_endpoint, sizeof(def->rep_endpoint) - 1);
+
+    def->js_source = strdup(js_source);
+    if (!def->js_source) return -1;
+
+    host->agent_count++;
+    return 0;
 }

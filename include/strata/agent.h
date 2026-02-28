@@ -60,4 +60,23 @@ pid_t strata_agent_spawn(strata_agent_host *host,
 /* Reap finished child processes (non-blocking) */
 int strata_agent_host_reap(strata_agent_host *host);
 
+/* Find agent definition by name */
+const strata_agent_def *strata_agent_host_find(const strata_agent_host *host,
+                                                const char *name);
+
+/* Register from in-memory buffers (used by village daemon) */
+int strata_agent_register_wasm_buf(strata_agent_host *host,
+                                    const char *name,
+                                    const unsigned char *wasm_buf, size_t wasm_len,
+                                    const char *sub_endpoint,
+                                    const char *req_endpoint);
+
+int strata_agent_register_js_buf(strata_agent_host *host,
+                                  const char *name,
+                                  const char *js_source,
+                                  const char *sub_endpoint,
+                                  const char *req_endpoint,
+                                  const char *pub_endpoint,
+                                  const char *rep_endpoint);
+
 #endif
