@@ -1,0 +1,120 @@
+cmake_minimum_required(VERSION 3.16)
+project(strata C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# macOS Homebrew paths
+if(APPLE)
+    execute_process(
+        COMMAND brew --prefix
+        OUTPUT_VARIABLE HOMEBREW_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    list(APPEND CMAKE_PREFIX_PATH
+        "${HOMEBREW_PREFIX}/opt/sqlite"
+        "${HOMEBREW_PREFIX}/opt/zeromq"
+        "${HOMEBREW_PREFIX}/opt/wasm-micro-runtime"
+    )
+endif()
+
+# SQLite
+find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
+find_library(SQLITE3_LIBRARY sqlite3)
+if(NOT SQLITE3_INCLUDE_DIR OR NOT SQLITE3_LIBRARY)
+    message(FATAL_ERROR "SQLite3 not found")
+endif()
+
+# ZeroMQ
+find_path(ZMQ_INCLUDE_DIR zmq.h)
+find_library(ZMQ_LIBRARY zmq)
+if(NOT ZMQ_INCLUDE_DIR OR NOT ZMQ_LIBRARY)
+    message(FATAL_ERROR "ZeroMQ not found")
+endif()
+
+# WAMR
+find_path(WAMR_INCLUDE_DIR wasm_export.h)
+find_library(WAMR_LIBRARY iwasm)
+if(NOT WAMR_INCLUDE_DIR OR NOT WAMR_LIBRARY)
+    message(FATAL_ERROR "WAMR (wasm-micro-runtime) not found")
+endif()
+
+# QuickJS (vendored)
+add_library(quickjs
+    vendor/quickjs/quickjs.c
+    vendor/quickjs/cutils.c
+    vendor/quickjs/libbf.c
+    vendor/quickjs/libregexp.c
+    vendor/quickjs/libunicode.c
+)
+target_include_directories(quickjs PUBLIC vendor/quickjs)
+target_compile_definitions(quickjs PRIVATE
+    CONFIG_VERSION="2024-01-13"
+    _GNU_SOURCE
+    CONFIG_BIGNUM
+)
+# Suppress warnings in vendored code
+target_compile_options(quickjs PRIVATE -w)
+
+# Strata library
+add_library(strata
+    src/schema.c
+    src/store.c
+    src/store_sqlite.c
+    src/context.c
+    src/change.c
+    src/agent.c
+    src/blob.c
+)
+target_include_directories(strata PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/vendor/quickjs
+    ${SQLITE3_INCLUDE_DIR}
+    ${ZMQ_INCLUDE_DIR}
+    ${WAMR_INCLUDE_DIR}
+)
+target_link_libraries(strata quickjs ${SQLITE3_LIBRARY} ${ZMQ_LIBRARY} ${WAMR_LIBRARY})
+
+# Store service
+add_library(store_service_lib OBJECT src/store_service.c)
+target_include_directories(store_service_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${SQLITE3_INCLUDE_DIR}
+    ${ZMQ_INCLUDE_DIR}
+)
+target_compile_definitions(store_service_lib PRIVATE STORE_SERVICE_NO_MAIN)
+
+add_executable(store_service src/store_service.c)
+target_include_directories(store_service PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${SQLITE3_INCLUDE_DIR}
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(store_service strata)
+
+# Tests
+enable_testing()
+
+add_executable(test_store test/test_store.c)
+target_link_libraries(test_store strata)
+add_test(NAME test_store COMMAND test_store)
+
+add_executable(test_change test/test_change.c)
+target_link_libraries(test_change strata)
+add_test(NAME test_change COMMAND test_change)
+
+add_executable(test_agent test/test_agent.c)
+target_link_libraries(test_agent strata)
+add_test(NAME test_agent COMMAND test_agent)
+
+add_executable(test_board test/test_board.c $<TARGET_OBJECTS:store_service_lib>)
+target_link_libraries(test_board strata)
+add_test(NAME test_board COMMAND test_board)
+
+add_executable(test_blob test/test_blob.c)
+target_link_libraries(test_blob strata)
+add_test(NAME test_blob COMMAND test_blob)
+
+# Examples
+add_executable(listener examples/listener.c)
+target_link_libraries(listener strata)
