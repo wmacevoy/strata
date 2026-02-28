@@ -408,6 +408,58 @@ static int cmd_blob_tags(strata_store *store, cli_opts *opts) {
     return 0;
 }
 
+static int cmd_privilege_grant(strata_store *store, cli_opts *opts) {
+    if (opts->argc < 2) {
+        fprintf(stderr, "usage: strata --db <path> privilege grant <entity> <privilege>\n"
+                        "  privileges: core, parent, vocation\n");
+        return 1;
+    }
+    int rc = strata_role_assign(store, opts->argv[0], opts->argv[1], "_system");
+    if (rc == 0) {
+        if (opts->plain)
+            printf("granted '%s' privilege '%s'\n", opts->argv[0], opts->argv[1]);
+        else
+            printf("{\"ok\":true,\"entity\":\"%s\",\"privilege\":\"%s\"}\n",
+                   opts->argv[0], opts->argv[1]);
+    } else {
+        fprintf(stderr, "privilege grant failed\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_privilege_revoke(strata_store *store, cli_opts *opts) {
+    if (opts->argc < 2) {
+        fprintf(stderr, "usage: strata --db <path> privilege revoke <entity> <privilege>\n");
+        return 1;
+    }
+    int rc = strata_role_revoke(store, opts->argv[0], opts->argv[1], "_system");
+    if (rc == 0) {
+        if (opts->plain)
+            printf("revoked '%s' privilege '%s'\n", opts->argv[0], opts->argv[1]);
+        else
+            printf("{\"ok\":true}\n");
+    } else {
+        fprintf(stderr, "privilege revoke failed\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_privilege_check(strata_store *store, cli_opts *opts) {
+    if (opts->argc < 2) {
+        fprintf(stderr, "usage: strata --db <path> privilege check <entity> <privilege>\n");
+        return 1;
+    }
+    int has = strata_has_privilege(store, opts->argv[0], opts->argv[1]);
+    if (opts->plain)
+        printf("%s\n", has ? "yes" : "no");
+    else
+        printf("{\"ok\":true,\"entity\":\"%s\",\"privilege\":\"%s\",\"has\":%s}\n",
+               opts->argv[0], opts->argv[1], has ? "true" : "false");
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Usage / main                                                       */
 /* ------------------------------------------------------------------ */
@@ -421,6 +473,11 @@ static void usage(void) {
         "  repo create <id> <name>           Create repository\n"
         "  role assign <entity> <role> <repo> Assign role\n"
         "  role revoke <entity> <role> <repo> Revoke role\n"
+        "\n"
+        "Privileges:\n"
+        "  privilege grant <entity> <priv>   Grant privilege (core/parent/vocation)\n"
+        "  privilege revoke <entity> <priv>  Revoke privilege\n"
+        "  privilege check <entity> <priv>   Check if entity has privilege\n"
         "\n"
         "Messages (require --entity):\n"
         "  msg post <repo> <type> <content> --roles r1,r2\n"
@@ -485,7 +542,8 @@ int main(int argc, char **argv) {
     int consumed = 1;
 
     if (subcmd && (strcmp(cmd, "repo") == 0 || strcmp(cmd, "role") == 0 ||
-                   strcmp(cmd, "msg") == 0 || strcmp(cmd, "blob") == 0)) {
+                   strcmp(cmd, "msg") == 0 || strcmp(cmd, "blob") == 0 ||
+                   strcmp(cmd, "privilege") == 0)) {
         snprintf(fullcmd, sizeof(fullcmd), "%s_%s", cmd, subcmd);
         consumed = 2;
     } else {
@@ -510,6 +568,9 @@ int main(int argc, char **argv) {
     else if (strcmp(fullcmd, "blob_tag") == 0)     rc = cmd_blob_tag(store, &opts);
     else if (strcmp(fullcmd, "blob_untag") == 0)   rc = cmd_blob_untag(store, &opts);
     else if (strcmp(fullcmd, "blob_tags") == 0)    rc = cmd_blob_tags(store, &opts);
+    else if (strcmp(fullcmd, "privilege_grant") == 0)  rc = cmd_privilege_grant(store, &opts);
+    else if (strcmp(fullcmd, "privilege_revoke") == 0) rc = cmd_privilege_revoke(store, &opts);
+    else if (strcmp(fullcmd, "privilege_check") == 0)  rc = cmd_privilege_check(store, &opts);
     else { fprintf(stderr, "unknown command: %s\n", fullcmd); usage(); rc = 1; }
 
     strata_store_close(store);

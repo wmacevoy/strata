@@ -71,6 +71,11 @@ int strata_store_init(strata_store *store) {
         sqlite3_free(err);
         return -1;
     }
+
+    /* Auto-create _system repo for privilege management */
+    strata_repo_create(store, "_system", "System privileges");
+    /* Ignore error — repo may already exist */
+
     return 0;
 }
 
@@ -329,4 +334,26 @@ void strata_artifact_cleanup(strata_artifact *a) {
         a->content = NULL;
         a->content_len = 0;
     }
+}
+
+int strata_has_privilege(strata_store *store, const char *entity_id,
+                         const char *privilege) {
+    if (!store || !entity_id || !privilege) return 0;
+
+    const char *sql =
+        "SELECT 1 FROM role_assignments "
+        "WHERE entity_id = ? AND role_name = ? AND repo_id = '_system' "
+        "AND (expires_at IS NULL OR expires_at > datetime('now')) "
+        "LIMIT 1";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_text(stmt, 1, entity_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, privilege, -1, SQLITE_STATIC);
+
+    int has = (sqlite3_step(stmt) == SQLITE_ROW) ? 1 : 0;
+    sqlite3_finalize(stmt);
+    return has;
 }

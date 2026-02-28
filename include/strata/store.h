@@ -53,4 +53,8 @@ int strata_artifact_list(strata_store *store, strata_ctx *ctx,
 
 void strata_artifact_cleanup(strata_artifact *a);
 
+/* Privilege system — roles on the _system repo */
+int strata_has_privilege(strata_store *store, const char *entity_id,
+                         const char *privilege);
+
 #endif

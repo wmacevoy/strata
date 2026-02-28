@@ -7,16 +7,17 @@
 #include <zmq.h>
 
 #include "strata/village.h"
-#include "strata/agent.h"
+#include "strata/den.h"
+#include "strata/store.h"
 #include "strata/json_util.h"
 
 /* ------------------------------------------------------------------ */
 /*  Local clone                                                        */
 /* ------------------------------------------------------------------ */
 
-pid_t strata_clone(strata_agent_host *host, const char *agent_name,
+pid_t strata_clone(strata_den_host *host, const char *den_name,
                    const char *event_json, int event_len) {
-    return strata_agent_spawn(host, agent_name, event_json, event_len);
+    return strata_den_spawn(host, den_name, event_json, event_len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,15 +125,25 @@ void strata_relay_destroy(strata_relay *relay) {
 /*  Remote clone (caller side)                                         */
 /* ------------------------------------------------------------------ */
 
-int strata_remote_clone(strata_agent_host *host, const char *agent_name,
+int strata_remote_clone(strata_den_host *host, const char *den_name,
                         const char *village_endpoint,
                         const char *origin_req_endpoint,
                         const char *event_json, int event_len,
                         strata_clone_result *result) {
-    if (!host || !agent_name || !village_endpoint || !result) return -1;
+    if (!host || !den_name || !village_endpoint || !result) return -1;
 
-    const strata_agent_def *def = strata_agent_host_find(host, agent_name);
+    const strata_den_def *def = strata_den_host_find(host, den_name);
     if (!def) return -1;
+
+    /* Privilege check: den needs "parent" to be cloned remotely */
+    strata_store *store = strata_den_host_get_store(host);
+    if (store && def->den_id[0]) {
+        if (!strata_has_privilege(store, def->den_id, "parent")) {
+            result->ok = 0;
+            strncpy(result->error, "no parent privilege", sizeof(result->error));
+            return -1;
+        }
+    }
 
     void *zmq_ctx = zmq_ctx_new();
     void *req = zmq_socket(zmq_ctx, ZMQ_REQ);
@@ -144,7 +155,7 @@ int strata_remote_clone(strata_agent_host *host, const char *agent_name,
     char header[2048];
     snprintf(header, sizeof(header),
         "{\"action\":\"clone\","
-        "\"agent_name\":\"%s\","
+        "\"den_name\":\"%s\","
         "\"mode\":\"%s\","
         "\"origin_req\":\"%s\"}",
         def->name,
@@ -153,7 +164,7 @@ int strata_remote_clone(strata_agent_host *host, const char *agent_name,
 
     zmq_send(req, header, strlen(header), ZMQ_SNDMORE);
 
-    /* Frame 1: agent binary */
+    /* Frame 1: den binary */
     if (def->mode == STRATA_MODE_JS) {
         zmq_send(req, def->js_source, strlen(def->js_source), ZMQ_SNDMORE);
     } else {
@@ -180,8 +191,8 @@ int strata_remote_clone(strata_agent_host *host, const char *agent_name,
     memset(result, 0, sizeof(*result));
     if (strstr(resp, "\"ok\":true")) {
         result->ok = 1;
-        json_get_string(resp, "agent_rep", result->agent_rep, sizeof(result->agent_rep));
-        json_get_string(resp, "agent_pub", result->agent_pub, sizeof(result->agent_pub));
+        json_get_string(resp, "den_rep", result->den_rep, sizeof(result->den_rep));
+        json_get_string(resp, "den_pub", result->den_pub, sizeof(result->den_pub));
     } else {
         result->ok = 0;
         json_get_string(resp, "error", result->error, sizeof(result->error));
@@ -203,9 +214,9 @@ static int next_port = 16000;
 #define MAX_SPAWNED 64
 
 typedef struct {
-    pid_t agent_pid;
+    pid_t den_pid;
     strata_relay *relay;
-    strata_agent_host *host;
+    strata_den_host *host;
 } spawned_entry;
 
 static spawned_entry spawned[MAX_SPAWNED];
@@ -227,7 +238,7 @@ static int handle_clone_request(void *rep_sock) {
         return -1;
     }
 
-    /* Frame 1: agent binary */
+    /* Frame 1: den binary */
     size_t payload_cap = 2 * 1024 * 1024;
     unsigned char *payload = malloc(payload_cap);
     int plen = zmq_recv(rep_sock, payload, payload_cap, 0);
@@ -249,18 +260,18 @@ static int handle_clone_request(void *rep_sock) {
     }
 
     /* Parse header */
-    char agent_name[64] = {0}, mode[8] = {0}, origin_req[256] = {0};
-    json_get_string(header, "agent_name", agent_name, sizeof(agent_name));
+    char den_name[64] = {0}, mode[8] = {0}, origin_req[256] = {0};
+    json_get_string(header, "den_name", den_name, sizeof(den_name));
     json_get_string(header, "mode", mode, sizeof(mode));
     json_get_string(header, "origin_req", origin_req, sizeof(origin_req));
 
     /* Allocate local ports */
     int port = next_port;
     next_port += 4;
-    char relay_rep[64], agent_rep[64], agent_pub[64];
+    char relay_rep[64], den_rep[64], den_pub[64];
     snprintf(relay_rep, sizeof(relay_rep), "tcp://127.0.0.1:%d", port);
-    snprintf(agent_rep, sizeof(agent_rep), "tcp://127.0.0.1:%d", port + 1);
-    snprintf(agent_pub, sizeof(agent_pub), "tcp://127.0.0.1:%d", port + 2);
+    snprintf(den_rep, sizeof(den_rep), "tcp://127.0.0.1:%d", port + 1);
+    snprintf(den_pub, sizeof(den_pub), "tcp://127.0.0.1:%d", port + 2);
 
     /* Start relay: local REP <-> origin REQ (store service) */
     strata_relay *relay = NULL;
@@ -269,19 +280,19 @@ static int handle_clone_request(void *rep_sock) {
         usleep(50000);  /* let relay bind */
     }
 
-    /* Register agent from received buffer */
-    strata_agent_host *host = strata_agent_host_create();
+    /* Register den from received buffer */
+    strata_den_host *host = strata_den_host_create();
     int rc;
     if (strcmp(mode, "js") == 0) {
         /* Null-terminate JS source */
         char *js = malloc(plen + 1);
         memcpy(js, payload, plen);
         js[plen] = '\0';
-        rc = strata_agent_register_js_buf(host, agent_name, js,
-                                           NULL, relay_rep, agent_pub, agent_rep);
+        rc = strata_den_register_js_buf(host, den_name, js,
+                                           NULL, relay_rep, den_pub, den_rep);
         free(js);
     } else {
-        rc = strata_agent_register_wasm_buf(host, agent_name,
+        rc = strata_den_register_wasm_buf(host, den_name,
                                              payload, plen, NULL, relay_rep);
     }
     free(payload);
@@ -289,30 +300,30 @@ static int handle_clone_request(void *rep_sock) {
     if (rc != 0) {
         const char *err = "{\"ok\":false,\"error\":\"register failed\"}";
         zmq_send(rep_sock, err, strlen(err), 0);
-        strata_agent_host_free(host);
+        strata_den_host_free(host);
         if (relay) strata_relay_destroy(relay);
         return -1;
     }
 
     /* Spawn */
-    pid_t pid = strata_agent_spawn(host, agent_name, event, event_len);
+    pid_t pid = strata_den_spawn(host, den_name, event, event_len);
 
     char resp[512];
     if (pid > 0) {
         snprintf(resp, sizeof(resp),
-            "{\"ok\":true,\"agent_name\":\"%s\","
-            "\"agent_rep\":\"%s\",\"agent_pub\":\"%s\"}",
-            agent_name, agent_rep, agent_pub);
+            "{\"ok\":true,\"den_name\":\"%s\","
+            "\"den_rep\":\"%s\",\"den_pub\":\"%s\"}",
+            den_name, den_rep, den_pub);
 
         if (spawned_count < MAX_SPAWNED) {
-            spawned[spawned_count].agent_pid = pid;
+            spawned[spawned_count].den_pid = pid;
             spawned[spawned_count].relay = relay;
             spawned[spawned_count].host = host;
             spawned_count++;
         }
     } else {
         snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"spawn failed\"}");
-        strata_agent_host_free(host);
+        strata_den_host_free(host);
         if (relay) strata_relay_destroy(relay);
     }
 
@@ -337,14 +348,14 @@ int strata_village_run(const char *listen_endpoint) {
         handle_clone_request(rep);
     }
 
-    /* Cleanup spawned agents and relays */
+    /* Cleanup spawned dens and relays */
     for (int i = 0; i < spawned_count; i++) {
-        if (spawned[i].agent_pid > 0) {
-            kill(spawned[i].agent_pid, SIGTERM);
-            waitpid(spawned[i].agent_pid, NULL, 0);
+        if (spawned[i].den_pid > 0) {
+            kill(spawned[i].den_pid, SIGTERM);
+            waitpid(spawned[i].den_pid, NULL, 0);
         }
         if (spawned[i].relay) strata_relay_destroy(spawned[i].relay);
-        if (spawned[i].host) strata_agent_host_free(spawned[i].host);
+        if (spawned[i].host) strata_den_host_free(spawned[i].host);
     }
 
     zmq_close(rep);

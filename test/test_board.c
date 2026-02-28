@@ -16,7 +16,7 @@
 #include <sys/wait.h>
 #include <zmq.h>
 #include "strata/store.h"
-#include "strata/agent.h"
+#include "strata/den.h"
 
 /* store_service_run from store_service.c */
 extern int store_service_run(const char *db_path, const char *endpoint);
@@ -65,11 +65,11 @@ int main(void) {
     usleep(200000);  /* let it bind */
     PASS();
 
-    /* Create agent host and register JS strata */
+    /* Create den host and register JS strata */
     TEST("register board strata");
-    strata_agent_host *host = strata_agent_host_create();
+    strata_den_host *host = strata_den_host_create();
     assert(host != NULL);
-    int rc = strata_js_register(host, "board", "agents/board.js",
+    int rc = strata_den_js_register(host, "board", "dens/board.js",
                                 NULL,            /* no SUB */
                                 STORE_ENDPOINT,  /* REQ to store */
                                 BOARD_PUB,       /* PUB for notifications */
@@ -79,7 +79,7 @@ int main(void) {
 
     /* Spawn board strata */
     TEST("spawn board strata");
-    pid_t board_pid = strata_agent_spawn(host, "board", "{}", 2);
+    pid_t board_pid = strata_den_spawn(host, "board", "{}", 2);
     assert(board_pid > 0);
     usleep(300000);  /* let it start and bind sockets */
     PASS();
@@ -155,7 +155,7 @@ int main(void) {
     zmq_close(client);
     zmq_close(notif_sub);
     zmq_ctx_destroy(zmq_ctx);
-    strata_agent_host_free(host);
+    strata_den_host_free(host);
     stop_store_service();
     unlink(DB_PATH);
 

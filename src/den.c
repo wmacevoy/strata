@@ -6,7 +6,8 @@
 #include <zmq.h>
 #include <wasm_export.h>
 
-#include "strata/agent.h"
+#include "strata/den.h"
+#include "strata/store.h"
 
 /* ------------------------------------------------------------------ */
 /*  Bedrock context — shared by WASM natives and QuickJS bindings   */
@@ -24,7 +25,7 @@ typedef struct {
 /*  ZMQ socket setup helpers                                           */
 /* ------------------------------------------------------------------ */
 
-static void bedrock_setup(bedrock_ctx_t *bedrock, strata_agent_def *def) {
+static void bedrock_setup(bedrock_ctx_t *bedrock, strata_den_def *def) {
     memset(bedrock, 0, sizeof(*bedrock));
     bedrock->zmq_ctx = zmq_ctx_new();
     int timeout = 5000;
@@ -244,7 +245,7 @@ static JSValue js_bedrock_receive(JSContext *ctx, JSValueConst this_val,
     return obj;
 }
 
-static void js_child_run(strata_agent_def *def,
+static void js_child_run(strata_den_def *def,
                          const char *event_json, int event_len) {
     bedrock_ctx_t bedrock;
     bedrock_setup(&bedrock, def);
@@ -300,25 +301,34 @@ static void js_child_run(strata_agent_def *def,
 }
 
 /* ------------------------------------------------------------------ */
-/*  Agent host                                                         */
+/*  Den host                                                         */
 /* ------------------------------------------------------------------ */
 
-struct strata_agent_host {
-    strata_agent_def agents[STRATA_MAX_AGENTS];
-    int agent_count;
+struct strata_den_host {
+    strata_den_def dens[STRATA_MAX_DENS];
+    int den_count;
+    strata_store *store;   /* optional — for privilege checks */
 };
 
-strata_agent_host *strata_agent_host_create(void) {
-    return calloc(1, sizeof(strata_agent_host));
+strata_den_host *strata_den_host_create(void) {
+    return calloc(1, sizeof(strata_den_host));
 }
 
-void strata_agent_host_free(strata_agent_host *host) {
+void strata_den_host_free(strata_den_host *host) {
     if (!host) return;
-    for (int i = 0; i < host->agent_count; i++) {
-        free(host->agents[i].wasm_buf);
-        free(host->agents[i].js_source);
+    for (int i = 0; i < host->den_count; i++) {
+        free(host->dens[i].wasm_buf);
+        free(host->dens[i].js_source);
     }
     free(host);
+}
+
+void strata_den_host_set_store(strata_den_host *host, strata_store *store) {
+    if (host) host->store = store;
+}
+
+strata_store *strata_den_host_get_store(const strata_den_host *host) {
+    return host ? host->store : NULL;
 }
 
 static char *load_text_file(const char *path) {
@@ -353,13 +363,13 @@ static unsigned char *load_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-int strata_agent_register(strata_agent_host *host,
+int strata_den_register(strata_den_host *host,
                           const char *name, const char *wasm_path,
                           const char *trigger_filter,
                           const char *sub_endpoint, const char *req_endpoint) {
-    if (!host || host->agent_count >= STRATA_MAX_AGENTS) return -1;
+    if (!host || host->den_count >= STRATA_MAX_DENS) return -1;
 
-    strata_agent_def *def = &host->agents[host->agent_count];
+    strata_den_def *def = &host->dens[host->den_count];
     memset(def, 0, sizeof(*def));
     def->mode = STRATA_MODE_WASM;
     strncpy(def->name, name, sizeof(def->name) - 1);
@@ -373,17 +383,17 @@ int strata_agent_register(strata_agent_host *host,
         fprintf(stderr, "failed to load %s\n", wasm_path);
         return -1;
     }
-    host->agent_count++;
+    host->den_count++;
     return 0;
 }
 
-int strata_js_register(strata_agent_host *host,
+int strata_den_js_register(strata_den_host *host,
                        const char *name, const char *js_path,
                        const char *sub_endpoint, const char *req_endpoint,
                        const char *pub_endpoint, const char *rep_endpoint) {
-    if (!host || host->agent_count >= STRATA_MAX_AGENTS) return -1;
+    if (!host || host->den_count >= STRATA_MAX_DENS) return -1;
 
-    strata_agent_def *def = &host->agents[host->agent_count];
+    strata_den_def *def = &host->dens[host->den_count];
     memset(def, 0, sizeof(*def));
     def->mode = STRATA_MODE_JS;
     strncpy(def->name, name, sizeof(def->name) - 1);
@@ -398,7 +408,7 @@ int strata_js_register(strata_agent_host *host,
         fprintf(stderr, "failed to load %s\n", js_path);
         return -1;
     }
-    host->agent_count++;
+    host->den_count++;
     return 0;
 }
 
@@ -406,7 +416,7 @@ int strata_js_register(strata_agent_host *host,
 /*  WASM child runner                  */
 /* ------------------------------------------------------------------ */
 
-static void wasm_child_run(strata_agent_def *def,
+static void wasm_child_run(strata_den_def *def,
                            const char *event_json, int event_len) {
     char err[128];
     bedrock_ctx_t bedrock;
@@ -495,23 +505,41 @@ cleanup:
 /*  Spawn: fork + dispatch by mode                                     */
 /* ------------------------------------------------------------------ */
 
-static strata_agent_def *find_agent(strata_agent_host *host, const char *name) {
-    for (int i = 0; i < host->agent_count; i++) {
-        if (strcmp(host->agents[i].name, name) == 0)
-            return &host->agents[i];
+static strata_den_def *find_den(strata_den_host *host, const char *name) {
+    for (int i = 0; i < host->den_count; i++) {
+        if (strcmp(host->dens[i].name, name) == 0)
+            return &host->dens[i];
     }
     return NULL;
 }
 
-pid_t strata_agent_spawn(strata_agent_host *host,
-                         const char *agent_name,
+pid_t strata_den_spawn(strata_den_host *host,
+                         const char *den_name,
                          const char *event_json, int event_len) {
-    if (!host || !agent_name) return -1;
+    if (!host || !den_name) return -1;
 
-    strata_agent_def *def = find_agent(host, agent_name);
+    strata_den_def *def = find_den(host, den_name);
     if (!def) {
-        fprintf(stderr, "agent '%s' not registered\n", agent_name);
+        fprintf(stderr, "den '%s' not registered\n", den_name);
         return -1;
+    }
+
+    /* Privilege check: caller needs "parent" to spawn */
+    if (host->store && def->den_id[0]) {
+        if (!strata_has_privilege(host->store, def->den_id, "parent")) {
+            fprintf(stderr, "den '%s' (id=%s): no 'parent' privilege\n",
+                    den_name, def->den_id);
+            return -1;
+        }
+    }
+
+    /* Local copy — strip pub/sub if no vocation privilege */
+    strata_den_def local_def = *def;
+    if (host->store && def->den_id[0]) {
+        if (!strata_has_privilege(host->store, def->den_id, "vocation")) {
+            local_def.pub_endpoint[0] = '\0';
+            local_def.sub_endpoint[0] = '\0';
+        }
     }
 
     pid_t pid = fork();
@@ -520,17 +548,17 @@ pid_t strata_agent_spawn(strata_agent_host *host,
     if (pid == 0) {
         signal(SIGTERM, SIG_DFL);
         signal(SIGINT, SIG_DFL);
-        if (def->mode == STRATA_MODE_JS)
-            js_child_run(def, event_json, event_len);
+        if (local_def.mode == STRATA_MODE_JS)
+            js_child_run(&local_def, event_json, event_len);
         else
-            wasm_child_run(def, event_json, event_len);
+            wasm_child_run(&local_def, event_json, event_len);
         _exit(0);
     }
 
     return pid;
 }
 
-int strata_agent_host_reap(strata_agent_host *host) {
+int strata_den_host_reap(strata_den_host *host) {
     (void)host;
     int count = 0;
     int status;
@@ -539,24 +567,24 @@ int strata_agent_host_reap(strata_agent_host *host) {
     return count;
 }
 
-const strata_agent_def *strata_agent_host_find(const strata_agent_host *host,
+const strata_den_def *strata_den_host_find(const strata_den_host *host,
                                                 const char *name) {
     if (!host || !name) return NULL;
-    for (int i = 0; i < host->agent_count; i++) {
-        if (strcmp(host->agents[i].name, name) == 0)
-            return &host->agents[i];
+    for (int i = 0; i < host->den_count; i++) {
+        if (strcmp(host->dens[i].name, name) == 0)
+            return &host->dens[i];
     }
     return NULL;
 }
 
-int strata_agent_register_wasm_buf(strata_agent_host *host,
+int strata_den_register_wasm_buf(strata_den_host *host,
                                     const char *name,
                                     const unsigned char *wasm_buf, size_t wasm_len,
                                     const char *sub_endpoint,
                                     const char *req_endpoint) {
-    if (!host || !name || !wasm_buf || host->agent_count >= STRATA_MAX_AGENTS) return -1;
+    if (!host || !name || !wasm_buf || host->den_count >= STRATA_MAX_DENS) return -1;
 
-    strata_agent_def *def = &host->agents[host->agent_count];
+    strata_den_def *def = &host->dens[host->den_count];
     memset(def, 0, sizeof(*def));
     def->mode = STRATA_MODE_WASM;
     strncpy(def->name, name, sizeof(def->name) - 1);
@@ -568,20 +596,20 @@ int strata_agent_register_wasm_buf(strata_agent_host *host,
     memcpy(def->wasm_buf, wasm_buf, wasm_len);
     def->wasm_len = wasm_len;
 
-    host->agent_count++;
+    host->den_count++;
     return 0;
 }
 
-int strata_agent_register_js_buf(strata_agent_host *host,
+int strata_den_register_js_buf(strata_den_host *host,
                                   const char *name,
                                   const char *js_source,
                                   const char *sub_endpoint,
                                   const char *req_endpoint,
                                   const char *pub_endpoint,
                                   const char *rep_endpoint) {
-    if (!host || !name || !js_source || host->agent_count >= STRATA_MAX_AGENTS) return -1;
+    if (!host || !name || !js_source || host->den_count >= STRATA_MAX_DENS) return -1;
 
-    strata_agent_def *def = &host->agents[host->agent_count];
+    strata_den_def *def = &host->dens[host->den_count];
     memset(def, 0, sizeof(*def));
     def->mode = STRATA_MODE_JS;
     strncpy(def->name, name, sizeof(def->name) - 1);
@@ -593,6 +621,6 @@ int strata_agent_register_js_buf(strata_agent_host *host,
     def->js_source = strdup(js_source);
     if (!def->js_source) return -1;
 
-    host->agent_count++;
+    host->den_count++;
     return 0;
 }

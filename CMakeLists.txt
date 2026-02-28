@@ -63,7 +63,7 @@ add_library(strata
     src/store_sqlite.c
     src/context.c
     src/change.c
-    src/agent.c
+    src/den.c
     src/blob.c
     src/village.c
 )
@@ -105,9 +105,9 @@ add_executable(test_change test/test_change.c)
 target_link_libraries(test_change strata)
 add_test(NAME test_change COMMAND test_change)
 
-add_executable(test_agent test/test_agent.c)
-target_link_libraries(test_agent strata)
-add_test(NAME test_agent COMMAND test_agent)
+add_executable(test_den test/test_den.c)
+target_link_libraries(test_den strata)
+add_test(NAME test_den COMMAND test_den)
 
 add_executable(test_board test/test_board.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_board strata)
@@ -134,9 +134,9 @@ add_executable(strata_cli src/cli_strata.c)
 target_link_libraries(strata_cli strata)
 set_target_properties(strata_cli PROPERTIES OUTPUT_NAME "strata")
 
-add_executable(strata_agent_cli src/cli_strata_agent.c)
-target_link_libraries(strata_agent_cli strata)
-set_target_properties(strata_agent_cli PROPERTIES OUTPUT_NAME "strata-agent")
+add_executable(strata_den_cli src/cli_strata_den.c)
+target_link_libraries(strata_den_cli strata)
+set_target_properties(strata_den_cli PROPERTIES OUTPUT_NAME "strata-den")
 
 # Examples
 add_executable(listener examples/listener.c)

@@ -1,5 +1,5 @@
 /*
- * strata-agent CLI — agent in container.
+ * strata-den CLI — den in container.
  *
  * All operations via ZMQ REQ/REP to store_service:
  *   msg post/list/get, blob put/get/find/tag/untag/tags, listen.
@@ -29,7 +29,7 @@ typedef struct {
     int timeout_ms;
     int argc;
     char **argv;
-} agent_opts;
+} den_opts;
 
 /* ------------------------------------------------------------------ */
 /*  CSV parsing                                                        */
@@ -80,9 +80,9 @@ static int append_json_array(char *buf, int cap, int pos,
 /*  Artifact commands                                                  */
 /* ------------------------------------------------------------------ */
 
-static int cmd_msg_post(void *sock, agent_opts *opts) {
+static int cmd_msg_post(void *sock, den_opts *opts) {
     if (opts->argc < 3) {
-        fprintf(stderr, "usage: strata-agent ... msg post <repo> <type> <content> --roles r1,r2\n");
+        fprintf(stderr, "usage: strata-den ... msg post <repo> <type> <content> --roles r1,r2\n");
         return 1;
     }
     char *roles[16];
@@ -107,9 +107,9 @@ static int cmd_msg_post(void *sock, agent_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_msg_list(void *sock, agent_opts *opts) {
+static int cmd_msg_list(void *sock, den_opts *opts) {
     if (opts->argc < 1) {
-        fprintf(stderr, "usage: strata-agent ... msg list <repo> [--type <type>]\n");
+        fprintf(stderr, "usage: strata-den ... msg list <repo> [--type <type>]\n");
         return 1;
     }
     char req[2048];
@@ -131,9 +131,9 @@ static int cmd_msg_list(void *sock, agent_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_msg_get(void *sock, agent_opts *opts) {
+static int cmd_msg_get(void *sock, den_opts *opts) {
     if (opts->argc < 1) {
-        fprintf(stderr, "usage: strata-agent ... msg get <artifact_id>\n");
+        fprintf(stderr, "usage: strata-den ... msg get <artifact_id>\n");
         return 1;
     }
     char req[512];
@@ -154,7 +154,7 @@ static int cmd_msg_get(void *sock, agent_opts *opts) {
 /*  Blob commands                                                      */
 /* ------------------------------------------------------------------ */
 
-static int cmd_blob_put(void *sock, agent_opts *opts) {
+static int cmd_blob_put(void *sock, den_opts *opts) {
     const char *content = NULL;
     char *file_content = NULL;
 
@@ -172,7 +172,7 @@ static int cmd_blob_put(void *sock, agent_opts *opts) {
     } else if (opts->argc >= 1) {
         content = opts->argv[0];
     } else {
-        fprintf(stderr, "usage: strata-agent ... blob put <content> --tags t1,t2 --roles r1,r2\n");
+        fprintf(stderr, "usage: strata-den ... blob put <content> --tags t1,t2 --roles r1,r2\n");
         return 1;
     }
 
@@ -203,9 +203,9 @@ static int cmd_blob_put(void *sock, agent_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_get(void *sock, agent_opts *opts) {
+static int cmd_blob_get(void *sock, den_opts *opts) {
     if (opts->argc < 1) {
-        fprintf(stderr, "usage: strata-agent ... blob get <blob_id>\n");
+        fprintf(stderr, "usage: strata-den ... blob get <blob_id>\n");
         return 1;
     }
     char req[512];
@@ -222,7 +222,7 @@ static int cmd_blob_get(void *sock, agent_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_find(void *sock, agent_opts *opts) {
+static int cmd_blob_find(void *sock, den_opts *opts) {
     char *tags[16];
     int ntags = parse_csv(opts->tags_csv, tags, 16);
 
@@ -242,9 +242,9 @@ static int cmd_blob_find(void *sock, agent_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_tag(void *sock, agent_opts *opts) {
+static int cmd_blob_tag(void *sock, den_opts *opts) {
     if (opts->argc < 2) {
-        fprintf(stderr, "usage: strata-agent ... blob tag <blob_id> <tag>\n");
+        fprintf(stderr, "usage: strata-den ... blob tag <blob_id> <tag>\n");
         return 1;
     }
     char req[512];
@@ -261,9 +261,9 @@ static int cmd_blob_tag(void *sock, agent_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_untag(void *sock, agent_opts *opts) {
+static int cmd_blob_untag(void *sock, den_opts *opts) {
     if (opts->argc < 2) {
-        fprintf(stderr, "usage: strata-agent ... blob untag <blob_id> <tag>\n");
+        fprintf(stderr, "usage: strata-den ... blob untag <blob_id> <tag>\n");
         return 1;
     }
     char req[512];
@@ -280,9 +280,9 @@ static int cmd_blob_untag(void *sock, agent_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_tags(void *sock, agent_opts *opts) {
+static int cmd_blob_tags(void *sock, den_opts *opts) {
     if (opts->argc < 1) {
-        fprintf(stderr, "usage: strata-agent ... blob tags <blob_id>\n");
+        fprintf(stderr, "usage: strata-den ... blob tags <blob_id>\n");
         return 1;
     }
     char req[512];
@@ -306,7 +306,7 @@ static volatile int listen_running = 1;
 
 static void listen_sigint(int sig) { (void)sig; listen_running = 0; }
 
-static int cmd_listen(agent_opts *opts) {
+static int cmd_listen(den_opts *opts) {
     const char *topic = opts->topic ? opts->topic : "change/";
 
     signal(SIGINT, listen_sigint);
@@ -347,7 +347,7 @@ static int cmd_listen(agent_opts *opts) {
 
 static void usage(void) {
     fprintf(stderr,
-        "usage: strata-agent --endpoint <url> --entity <id> [--plain] <command> [args...]\n"
+        "usage: strata-den --endpoint <url> --entity <id> [--plain] <command> [args...]\n"
         "\n"
         "Messages:\n"
         "  msg post <repo> <type> <content> --roles r1,r2\n"
@@ -369,7 +369,7 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
-    agent_opts opts = { .timeout_ms = 5000 };
+    den_opts opts = { .timeout_ms = 5000 };
 
     static struct option long_opts[] = {
         {"endpoint", required_argument, NULL, 'E'},

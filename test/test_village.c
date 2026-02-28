@@ -9,7 +9,7 @@
 
 #include "strata/store.h"
 #include "strata/context.h"
-#include "strata/agent.h"
+#include "strata/den.h"
 #include "strata/village.h"
 
 /* store_service_run from store_service.c (linked as object lib) */
@@ -96,11 +96,11 @@ int main(void) {
     start_store();
 
     /* Register board.js strata */
-    strata_agent_host *host = strata_agent_host_create();
+    strata_den_host *host = strata_den_host_create();
     assert(host != NULL);
 
     TEST("register board.js strata");
-    int rc = strata_js_register(host, "board", "agents/board.js",
+    int rc = strata_den_js_register(host, "board", "dens/board.js",
                                  NULL, STORE_ENDPOINT,
                                  LOCAL_BOARD_PUB, LOCAL_BOARD_REP);
     assert(rc == 0);
@@ -159,13 +159,13 @@ int main(void) {
                               STORE_ENDPOINT, "{}", 2, &result);
     assert(rc == 0);
     assert(result.ok == 1);
-    assert(result.agent_rep[0] != '\0');
+    assert(result.den_rep[0] != '\0');
     usleep(300000);
     PASS();
 
     TEST("post message to remote clone");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(result.agent_rep,
+    rc = zmq_request(result.den_rep,
         "{\"action\":\"post\",\"author\":\"bob\",\"message\":\"hello from remote\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -174,7 +174,7 @@ int main(void) {
 
     TEST("list messages from remote clone shows both");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(result.agent_rep,
+    rc = zmq_request(result.den_rep,
         "{\"action\":\"list\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -205,7 +205,7 @@ int main(void) {
     PASS();
 
     /* Cleanup */
-    strata_agent_host_free(host);
+    strata_den_host_free(host);
     stop_village();
     stop_store();
     unlink(DB_PATH);
