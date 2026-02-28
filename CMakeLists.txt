@@ -129,6 +129,15 @@ target_include_directories(village_daemon PRIVATE
 )
 target_link_libraries(village_daemon strata)
 
+# CLI tools
+add_executable(strata_cli src/cli_strata.c)
+target_link_libraries(strata_cli strata)
+set_target_properties(strata_cli PROPERTIES OUTPUT_NAME "strata")
+
+add_executable(strata_agent_cli src/cli_strata_agent.c)
+target_link_libraries(strata_agent_cli strata)
+set_target_properties(strata_agent_cli PROPERTIES OUTPUT_NAME "strata-agent")
+
 # Examples
 add_executable(listener examples/listener.c)
 target_link_libraries(listener strata)
