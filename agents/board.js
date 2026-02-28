@@ -1,8 +1,8 @@
 // Message Board Strata
 //
-// Serves a message board API via atmo.serve_recv/serve_send (ZMQ REP).
-// Persists messages via atmo.request to the store service (ZMQ REQ).
-// Publishes notifications via atmo.publish (ZMQ PUB).
+// Serves a message board API via bedrock.serve_recv/serve_send (ZMQ REP).
+// Persists messages via bedrock.request to the store service (ZMQ REQ).
+// Publishes notifications via bedrock.publish (ZMQ PUB).
 //
 // API:
 //   POST: {"action":"post","author":"alice","message":"hello"}
@@ -22,7 +22,7 @@ function store_put(author, message) {
         author: author,
         roles: ["user"]
     });
-    var resp = atmo.request(req);
+    var resp = bedrock.request(req);
     if (resp === null) return null;
     return JSON.parse(resp);
 }
@@ -34,7 +34,7 @@ function store_list() {
         type: "message",
         entity: STORE_ENTITY
     });
-    var resp = atmo.request(req);
+    var resp = bedrock.request(req);
     if (resp === null) return null;
     return JSON.parse(resp);
 }
@@ -55,7 +55,7 @@ function handle_post(req) {
         message: req.message,
         id: result.id
     });
-    atmo.publish("board/new", notification);
+    bedrock.publish("board/new", notification);
 
     return JSON.stringify({ok: true, id: result.id});
 }
@@ -83,10 +83,10 @@ function handle_list() {
 }
 
 // Serve loop
-atmo.log("board strata starting");
+bedrock.log("board strata starting");
 var count = 0;
 while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
-    var raw = atmo.serve_recv();
+    var raw = bedrock.serve_recv();
     if (raw === null) continue;  // timeout
 
     var response;
@@ -103,7 +103,7 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
         response = JSON.stringify({ok: false, error: "parse error: " + e.message});
     }
 
-    atmo.serve_send(response);
+    bedrock.serve_send(response);
     count++;
 }
-atmo.log("board strata exiting after " + count + " requests");
+bedrock.log("board strata exiting after " + count + " requests");

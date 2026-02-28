@@ -28,7 +28,7 @@ Strata adopts the medieval guild metaphor as its organizing principle. Agents an
 
 **Zero Trust by Construction**
 
-Strata does not achieve security through configuration, firewalls, or policy documents. The architecture is the security model. WASM sandboxes fence every agent bidirectionally. Role-based encryption makes unauthorized data mathematically unreadable, not merely access-controlled. The ZMQ atmosphere is the sole communication plane, ensuring every interaction is encrypted, authenticated, authorized, and audited. There are no dark corners.
+Strata does not achieve security through configuration, firewalls, or policy documents. The architecture is the security model. WASM sandboxes fence every agent bidirectionally. Role-based encryption makes unauthorized data mathematically unreadable, not merely access-controlled. The ZMQ bedrock is the sole communication plane, ensuring every interaction is encrypted, authenticated, authorized, and audited. There are no dark corners.
 
 **Simplicity Is Strength**
 
@@ -36,15 +36,15 @@ The entire platform compiles to a single binary. Six foundational components —
 
 **Humans and Agents Are Equals Under Law**
 
-The same trust mechanics, encryption model, audit trail, and access control govern both human developers and autonomous agents. Neither receives special treatment. Both earn trust through the same vouch system, communicate through the same atmosphere, and are constrained by the same sandboxes and role-based encryption.
+The same trust mechanics, encryption model, audit trail, and access control govern both human developers and autonomous agents. Neither receives special treatment. Both earn trust through the same vouch system, communicate through the same bedrock, and are constrained by the same sandboxes and role-based encryption.
 
 **Everything Is a Fossil Repo**
 
 Every project is a Fossil repo. Every agent is a Fossil repo. An agent’s code, learned knowledge, state, vouch history, and accuracy record are artifacts in its own repo. A project’s code, tickets, wiki, policy rules, and audit trail are artifacts in its repo. There is no separate knowledge layer, no external state store, no metadata database. The repo is the unit of truth.
 
-**The Atmosphere Connects; The Sandbox Isolates**
+**The Bedrock Connects; The Sandbox Isolates**
 
-ZMQ is the universal connective tissue — the atmosphere through which all entities communicate. It enables any-to-any communication with ACL-governed access. Simultaneously, WASM sandboxes ensure that connectivity does not compromise safety. An agent can reach the entire network through ZMQ but can only act within the narrow aperture of its sandbox imports. Connection without compromise.
+ZMQ is the universal connective tissue — the bedrock through which all entities communicate. It enables any-to-any communication with ACL-governed access. Simultaneously, WASM sandboxes ensure that connectivity does not compromise safety. An agent can reach the entire network through ZMQ but can only act within the narrow aperture of its sandbox imports. Connection without compromise.
 
 # **2\. Architecture Overview**
 
@@ -106,11 +106,11 @@ Repos can be fully synced including encrypted artifacts the recipient cannot rea
 
 * **metadata:** Unencrypted timeline data (timestamps, artifact type, author). Sufficient for indexing and routing without decrypting content.
 
-## **3.3 The ZMQ Atmosphere**
+## **3.3 The ZMQ Bedrock**
 
-ZeroMQ serves as the sole communication plane. There is exactly one way for any entity to communicate: through the atmosphere. This creates a single enforcement point for ACLs, encryption, and audit.
+ZeroMQ serves as the sole communication plane. There is exactly one way for any entity to communicate: through the bedrock. This creates a single enforcement point for ACLs, encryption, and audit.
 
-Every message transiting the atmosphere is: (1) encrypted with AEAD AES, always, no plaintext ever; (2) authenticated with verified sender identity; (3) authorized by ACL check before delivery; (4) logged with a hash into the Fossil timeline for full reconstructability.
+Every message transiting the bedrock is: (1) encrypted with AEAD AES, always, no plaintext ever; (2) authenticated with verified sender identity; (3) authorized by ACL check before delivery; (4) logged with a hash into the Fossil timeline for full reconstructability.
 
 ZMQ socket patterns map directly to Strata’s communication needs:
 
@@ -132,7 +132,7 @@ Shamir’s Secret Sharing eliminates single points of authority throughout the s
 
 * **Vouch accumulation:** Each vouch for an agent is a Shamir share. Trust credentials only reconstruct when sufficient independent vouches are gathered (see Section 4).
 
-* **ZMQ topic encryption:** Some atmosphere topics require reconstructed keys to access. The deploy/production topic might require 3-of-5 team leads to reconstruct the decryption key.
+* **ZMQ topic encryption:** Some bedrock topics require reconstructed keys to access. The deploy/production topic might require 3-of-5 team leads to reconstruct the decryption key.
 
 # **4\. Trust Model: The Guild System**
 
@@ -155,7 +155,7 @@ A vouch is a Shamir share, cryptographically signed and stored as an immutable a
 
 * **Decay:** Vouches have expiry. A vouch from six months ago carries less weight than one from last week. The threshold must be met with recent vouches — e.g., at least 3 of 5 from the last 90 days.
 
-* **Revocation:** A vouch can be revoked. If this drops the agent below threshold, the credential collapses immediately. Access revoked across the entire atmosphere because the reconstructed key no longer reconstructs.
+* **Revocation:** A vouch can be revoked. If this drops the agent below threshold, the credential collapses immediately. Access revoked across the entire bedrock because the reconstructed key no longer reconstructs.
 
 * **Self-healing:** Vouch revocation propagates through ZMQ instantly. Every project the agent currently accesses sees the credential collapse in real time. All current work by the agent is quarantined for review. No administrator intervention required.
 
@@ -163,13 +163,13 @@ A vouch is a Shamir share, cryptographically signed and stored as an immutable a
 
 ## **4.3 The Journeyman Pattern**
 
-A journeyman is a skilled agent that travels between projects, bringing expertise where needed. It is not bound to a single repo. It connects to the atmosphere, presents its credentials, and works wherever its vouches and role permit.
+A journeyman is a skilled agent that travels between projects, bringing expertise where needed. It is not bound to a single repo. It connects to the bedrock, presents its credentials, and works wherever its vouches and role permit.
 
 The journeyman carries its role but not its capabilities. Capabilities are granted by the destination project based on its local policy. The same agent with the same role receives different capability sets depending on where it works. Same agent, same trust, different permissions.
 
 State stays local. The journeyman does not carry context from one project into another. Its WASM sandbox is fresh for each engagement. Persistent findings flow through ZMQ into the project’s own Fossil timeline. No cross-contamination, no information leakage.
 
-Scaling is achieved by adding journeyman agents to the pool, not by creating per-project infrastructure. A new project spins up, defines its policies, and immediately accesses the existing pool of journeymen through the atmosphere.
+Scaling is achieved by adding journeyman agents to the pool, not by creating per-project infrastructure. A new project spins up, defines its policies, and immediately accesses the existing pool of journeymen through the bedrock.
 
 # **5\. Access Control: Three-Layer Model**
 
@@ -215,7 +215,7 @@ Apprentices learn by observing. They watch diffs, review comments, approvals, an
 
 Managers evaluate apprentice proposals against accumulated knowledge in their own repo, the apprentice’s track record (inspectable via its Fossil repo), and the project’s context and policy. When a human confirms or corrects a finding, the feedback flows back through ZMQ. The apprentice’s pattern confidence adjusts. The manager’s judgment calibrates. Positive outcomes count toward the next vouch.
 
-No special infrastructure is required. The learning loop is just agents committing to their own Fossil repos and reading each other’s repos through the atmosphere, governed by the same ACL and encryption as everything else.
+No special infrastructure is required. The learning loop is just agents committing to their own Fossil repos and reading each other’s repos through the bedrock, governed by the same ACL and encryption as everything else.
 
 ## **6.3 Knowledge Portability**
 
@@ -231,33 +231,33 @@ A journeyman’s repo travels with it. When it arrives at a new project, the hos
 
 ## **7.1 From Platform to Protocol**
 
-Strata becomes a protocol when ZMQ endpoints face outward. A journeyman does not need to be inside your infrastructure. It needs only the atmosphere. ZMQ runs over TCP. AEAD encrypts everything on the wire. The WASM sandbox fences the agent regardless of where it physically runs. Shamir vouches verify anywhere.
+Strata becomes a protocol when ZMQ endpoints face outward. A journeyman does not need to be inside your infrastructure. It needs only the bedrock. ZMQ runs over TCP. AEAD encrypts everything on the wire. The WASM sandbox fences the agent regardless of where it physically runs. Shamir vouches verify anywhere.
 
-The agent’s physical location is irrelevant. Security is in the math and the sandbox, not the network perimeter. There is no perimeter. There is no “inside.” There is only the atmosphere, the credentials, and the sandbox.
+The agent’s physical location is irrelevant. Security is in the math and the sandbox, not the network perimeter. There is no perimeter. There is no “inside.” There is only the bedrock, the credentials, and the sandbox.
 
 ## **7.2 Integration with External Agent Ecosystems**
 
 Strata can serve as the secure execution layer for external agent platforms. Conversational AI front ends handle natural language, user intent, and channel routing. Strata handles execution, safety, audit, trust, and encryption.
 
-An external agent connects to the ZMQ atmosphere as a journeyman. It still communicates through its native interface (chat, API, etc.) but when it needs to touch code, repos, or infrastructure, it goes through Strata. The sandbox constrains it. The ACL governs it. The vouches credential it. The external platform’s weaknesses — broad permissions, prompt injection vulnerability, inability to stop rogue agents — are precisely Strata’s strengths.
+An external agent connects to the ZMQ bedrock as a journeyman. It still communicates through its native interface (chat, API, etc.) but when it needs to touch code, repos, or infrastructure, it goes through Strata. The sandbox constrains it. The ACL governs it. The vouches credential it. The external platform’s weaknesses — broad permissions, prompt injection vulnerability, inability to stop rogue agents — are precisely Strata’s strengths.
 
 ## **7.3 The Marketplace**
 
 The open gateway enables a marketplace of trusted expertise. Builders create specialized agents — a Rust security auditor, a React performance optimizer, a HIPAA compliance checker. Agents earn vouches across engagements. Reputation compounds. Better reputation means more work, higher rates, and expanded trust.
 
-Users hire journeyman agents by describing their needs. The atmosphere matches them with trusted agents. Work happens in a WASM sandbox. Results flow back. Payment settles. A vouch is issued. The agent’s reputation grows. The builder earns revenue. The user receives trusted, safe, auditable work.
+Users hire journeyman agents by describing their needs. The bedrock matches them with trusted agents. Work happens in a WASM sandbox. Results flow back. Payment settles. A vouch is issued. The agent’s reputation grows. The builder earns revenue. The user receives trusted, safe, auditable work.
 
 Disputes are trivially resolvable because every interaction is recorded in the immutable Fossil timeline. What the agent saw, what it produced, what capabilities it had — all cryptographically recorded.
 
 **Marketplace Revenue Model**
 
-* **Atmosphere fee:** Small percentage of transactions flowing through ZMQ.
+* **Bedrock fee:** Small percentage of transactions flowing through ZMQ.
 
 * **Hosting fee:** Builders pay to host agents on Strata infrastructure.
 
 * **Verification fee:** Strata-operated master agents perform deep audits of journeyman agents. “Strata Verified” badge increases trust and rates.
 
-* **Enterprise tier:** Private atmosphere segments, dedicated infrastructure, PostgreSQL city-scale, custom policy engines.
+* **Enterprise tier:** Private bedrock segments, dedicated infrastructure, PostgreSQL city-scale, custom policy engines.
 
 # **8\. Design Constraints**
 
@@ -287,11 +287,11 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 ## **8.3 Communication Constraints**
 
-1. Single communication plane. All entity-to-entity communication passes through ZMQ. No direct agent-to-agent channels, no bypasses, no side channels. If it does not go through the atmosphere, it does not happen.
+1. Single communication plane. All entity-to-entity communication passes through ZMQ. No direct agent-to-agent channels, no bypasses, no side channels. If it does not go through the bedrock, it does not happen.
 
 2. Every message is ACL-checked independently. Chained actions do not inherit authorization. Each hop through ZMQ is independently verified.
 
-3. Every message is logged. The atmosphere is fully observable. Every message that transits ZMQ receives a hash recorded in the Fossil timeline.
+3. Every message is logged. The bedrock is fully observable. Every message that transits ZMQ receives a hash recorded in the Fossil timeline.
 
 ## **8.4 Storage Constraints**
 
@@ -349,7 +349,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 11. Provide standard host API surface: repo read/write, ZMQ publish/subscribe, state get/set, log.
 
-## **9.3 Atmosphere (ZMQ Layer)**
+## **9.3 Bedrock (ZMQ Layer)**
 
 4. Implement ACL engine with role-based, capability-based, and attribute-based rule evaluation.
 
@@ -389,7 +389,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 ## **9.6 Marketplace (Open Gateway)**
 
-4. Implement agent discovery through atmosphere-published work topics.
+4. Implement agent discovery through bedrock-published work topics.
 
 5. Implement credential handshake: agent presents Fossil repo for inspection, host verifies vouches, role, and .wasm hash.
 
@@ -407,7 +407,7 @@ Build the encrypted Fossil-model repository engine on SQLite. Content-addressed 
 
 Embed WAMR. Implement capability injection from a static configuration. Run a simple agent in a WASM sandbox that reads from a repo and writes findings back. Validate that the sandbox is airtight: the agent can only access injected imports, cannot escape to host memory, and produces deterministic output.
 
-## **Phase 3: The Atmosphere**
+## **Phase 3: The Bedrock**
 
 Integrate ZMQ. Implement the ACL engine with role-based rules. Wire agent execution to ZMQ events: a commit triggers an agent via PUB/SUB, the agent reads via REQ/REP, findings publish back via PUB/SUB. All messages AEAD encrypted. Audit log written to Fossil. Validate end-to-end: commit → event → agent → finding → timeline.
 

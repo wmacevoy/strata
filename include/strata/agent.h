@@ -8,7 +8,7 @@
 
 typedef enum {
     STRATA_MODE_WASM,    /* WASM agent (on_event, fire-and-forget) */
-    STRATA_MODE_JS       /* QuickJS strata (serve loop, full atmosphere) */
+    STRATA_MODE_JS       /* QuickJS strata (serve loop, full bedrock) */
 } strata_mode;
 
 typedef struct strata_agent_def {
@@ -43,7 +43,7 @@ int strata_agent_register(strata_agent_host *host,
                           const char *sub_endpoint,
                           const char *req_endpoint);
 
-/* Register a JS strata (QuickJS, full atmosphere) */
+/* Register a JS strata (QuickJS, full bedrock) */
 int strata_js_register(strata_agent_host *host,
                        const char *name,
                        const char *js_path,

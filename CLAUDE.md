@@ -10,7 +10,7 @@ Fossil Strata is a secure, hyper-lightweight, multi-tenant SCM and agent orchest
 - **Simplicity is strength.** Six components, one binary, under 5 MB. If it can't be built from the six foundations, it doesn't belong.
 - **Humans and agents are equals under cryptographic law.** Same trust mechanics, same encryption, same audit trail, same sandboxes.
 - **Everything is a Fossil repo.** Every project, every agent. Code, knowledge, state, vouches, accuracy records — all artifacts in repos.
-- **The atmosphere connects; the sandbox isolates.** ZMQ enables any-to-any communication. WASM ensures connectivity doesn't compromise safety.
+- **The bedrock connects; the sandbox isolates.** ZMQ enables any-to-any communication. WASM ensures connectivity doesn't compromise safety.
 
 ## The Six Foundations
 
@@ -19,7 +19,7 @@ Fossil Strata is a secure, hyper-lightweight, multi-tenant SCM and agent orchest
 | **SQLite** | Storage | Zero-config, one file per repo. Substitutable with PostgreSQL for city-scale. |
 | **Fossil Model** | Repo structure | Content-addressed Merkle tree, immutable timeline, wiki/tickets/artifacts. Reinvented with role-based envelope encryption. |
 | **WAMR** | Agent execution | ~50–85 KiB. Interpreter/AOT/JIT. Agents compile from Rust, C, Zig, Go, AssemblyScript, JS to .wasm. |
-| **ZeroMQ** | Communication | The sole communication plane ("the atmosphere"). PUB/SUB, PUSH/PULL, REQ/REP, DEALER/ROUTER. |
+| **ZeroMQ** | Communication | The sole communication plane ("the bedrock"). PUB/SUB, PUSH/PULL, REQ/REP, DEALER/ROUTER. |
 | **AEAD AES** | Encryption | Authenticated encryption. Every artifact at rest, every message on the wire. Always. |
 | **Shamir SSS** | Trust & governance | M-of-N secret sharing for key management, vouch accumulation, critical action authorization. |
 
@@ -33,7 +33,7 @@ Nothing else is permitted in the core.
 ├───────────────────────────────────────┤
 │  WAMR sandboxes (agents)              │  ← Bidirectional fencing
 ├───────────────────────────────────────┤
-│  ZMQ atmosphere (communication)       │  ← ACL, encrypted, audited
+│  ZMQ bedrock (communication)       │  ← ACL, encrypted, audited
 ├───────────────────────────────────────┤
 │  AEAD + Shamir (crypto + governance)  │  ← Role-based envelope encryption
 ├───────────────────────────────────────┤
@@ -65,7 +65,7 @@ role_keys[]      → per-role encrypted DEK copies
 metadata         → unencrypted (timestamps, type, author) for indexing
 ```
 
-### ZMQ Atmosphere
+### ZMQ Bedrock
 - Single communication plane. Everything goes through ZMQ. No bypasses, no side channels.
 - Every message: AEAD encrypted, sender authenticated, ACL authorized, audit logged to Fossil.
 - Patterns: PUB/SUB (events), PUSH/PULL (task queues), REQ/REP (queries), DEALER/ROUTER (routing).
@@ -153,7 +153,7 @@ Enables: marketplace of trusted expertise, paid journeyman engagements, external
 
 1. **The Bones** — Encrypted Fossil-model repo engine on SQLite. AEAD envelope encryption, Merkle tree, basic sync.
 2. **The Sandbox** — Embed WAMR. Capability injection. First agent reading/writing a repo in a sandbox.
-3. **The Atmosphere** — ZMQ integration. ACL engine. Event-driven agent execution. Audit logging.
+3. **The Bedrock** — ZMQ integration. ACL engine. Event-driven agent execution. Audit logging.
 4. **The Guild** — Shamir vouches. Trust tiers. Credential collapse propagation.
 5. **The Journey** — Journeyman pattern. Cross-project travel. Attribute engine. Quarantine.
 6. **The City** — PostgreSQL backend. Storage abstraction. Edge federation. Migration tooling.

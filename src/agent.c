@@ -9,7 +9,7 @@
 #include "strata/agent.h"
 
 /* ------------------------------------------------------------------ */
-/*  Atmosphere context — shared by WASM natives and QuickJS bindings   */
+/*  Bedrock context — shared by WASM natives and QuickJS bindings   */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -18,104 +18,104 @@ typedef struct {
     void *req_sock;
     void *pub_sock;
     void *rep_sock;
-} atmo_ctx_t;
+} bedrock_ctx_t;
 
 /* ------------------------------------------------------------------ */
 /*  ZMQ socket setup helpers                                           */
 /* ------------------------------------------------------------------ */
 
-static void atmo_setup(atmo_ctx_t *atmo, strata_agent_def *def) {
-    memset(atmo, 0, sizeof(*atmo));
-    atmo->zmq_ctx = zmq_ctx_new();
+static void bedrock_setup(bedrock_ctx_t *bedrock, strata_agent_def *def) {
+    memset(bedrock, 0, sizeof(*bedrock));
+    bedrock->zmq_ctx = zmq_ctx_new();
     int timeout = 5000;
 
     if (def->sub_endpoint[0]) {
-        atmo->sub_sock = zmq_socket(atmo->zmq_ctx, ZMQ_SUB);
-        zmq_connect(atmo->sub_sock, def->sub_endpoint);
-        zmq_setsockopt(atmo->sub_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+        bedrock->sub_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_SUB);
+        zmq_connect(bedrock->sub_sock, def->sub_endpoint);
+        zmq_setsockopt(bedrock->sub_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
     }
     if (def->req_endpoint[0]) {
-        atmo->req_sock = zmq_socket(atmo->zmq_ctx, ZMQ_REQ);
-        zmq_connect(atmo->req_sock, def->req_endpoint);
-        zmq_setsockopt(atmo->req_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+        bedrock->req_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_REQ);
+        zmq_connect(bedrock->req_sock, def->req_endpoint);
+        zmq_setsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
     }
     if (def->pub_endpoint[0]) {
-        atmo->pub_sock = zmq_socket(atmo->zmq_ctx, ZMQ_PUB);
-        zmq_bind(atmo->pub_sock, def->pub_endpoint);
+        bedrock->pub_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_PUB);
+        zmq_bind(bedrock->pub_sock, def->pub_endpoint);
     }
     if (def->rep_endpoint[0]) {
-        atmo->rep_sock = zmq_socket(atmo->zmq_ctx, ZMQ_REP);
-        zmq_bind(atmo->rep_sock, def->rep_endpoint);
-        zmq_setsockopt(atmo->rep_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+        bedrock->rep_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_REP);
+        zmq_bind(bedrock->rep_sock, def->rep_endpoint);
+        zmq_setsockopt(bedrock->rep_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
     }
 }
 
-static void atmo_teardown(atmo_ctx_t *atmo) {
-    if (atmo->sub_sock) zmq_close(atmo->sub_sock);
-    if (atmo->req_sock) zmq_close(atmo->req_sock);
-    if (atmo->pub_sock) zmq_close(atmo->pub_sock);
-    if (atmo->rep_sock) zmq_close(atmo->rep_sock);
-    if (atmo->zmq_ctx)  zmq_ctx_destroy(atmo->zmq_ctx);
+static void bedrock_teardown(bedrock_ctx_t *bedrock) {
+    if (bedrock->sub_sock) zmq_close(bedrock->sub_sock);
+    if (bedrock->req_sock) zmq_close(bedrock->req_sock);
+    if (bedrock->pub_sock) zmq_close(bedrock->pub_sock);
+    if (bedrock->rep_sock) zmq_close(bedrock->rep_sock);
+    if (bedrock->zmq_ctx)  zmq_ctx_destroy(bedrock->zmq_ctx);
 }
 
 /* ------------------------------------------------------------------ */
 /*  WASM native functions                                              */
 /* ------------------------------------------------------------------ */
 
-static void wasm_atmo_log(wasm_exec_env_t exec_env,
+static void wasm_bedrock_log(wasm_exec_env_t exec_env,
                           char *msg, int32_t msg_len) {
     (void)exec_env;
     fprintf(stderr, "[wasm] %.*s\n", msg_len, msg);
 }
 
-static int32_t wasm_atmo_subscribe(wasm_exec_env_t exec_env,
+static int32_t wasm_bedrock_subscribe(wasm_exec_env_t exec_env,
                                    char *filter, int32_t filter_len) {
-    atmo_ctx_t *atmo = wasm_runtime_get_function_attachment(exec_env);
-    if (!atmo || !atmo->sub_sock) return -1;
-    return zmq_setsockopt(atmo->sub_sock, ZMQ_SUBSCRIBE, filter, filter_len);
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->sub_sock) return -1;
+    return zmq_setsockopt(bedrock->sub_sock, ZMQ_SUBSCRIBE, filter, filter_len);
 }
 
-static int32_t wasm_atmo_receive(wasm_exec_env_t exec_env,
+static int32_t wasm_bedrock_receive(wasm_exec_env_t exec_env,
                                  char *topic_buf, int32_t topic_cap,
                                  char *payload_buf, int32_t payload_cap) {
-    atmo_ctx_t *atmo = wasm_runtime_get_function_attachment(exec_env);
-    if (!atmo || !atmo->sub_sock) return -1;
-    int rc = zmq_recv(atmo->sub_sock, topic_buf, topic_cap, 0);
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->sub_sock) return -1;
+    int rc = zmq_recv(bedrock->sub_sock, topic_buf, topic_cap, 0);
     if (rc < 0) return -1;
-    return zmq_recv(atmo->sub_sock, payload_buf, payload_cap, 0);
+    return zmq_recv(bedrock->sub_sock, payload_buf, payload_cap, 0);
 }
 
-static int32_t wasm_atmo_request(wasm_exec_env_t exec_env,
+static int32_t wasm_bedrock_request(wasm_exec_env_t exec_env,
                                  char *req, int32_t req_len,
                                  char *resp_buf, int32_t resp_cap) {
-    atmo_ctx_t *atmo = wasm_runtime_get_function_attachment(exec_env);
-    if (!atmo || !atmo->req_sock) return -1;
-    int rc = zmq_send(atmo->req_sock, req, req_len, 0);
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->req_sock) return -1;
+    int rc = zmq_send(bedrock->req_sock, req, req_len, 0);
     if (rc < 0) return -1;
-    return zmq_recv(atmo->req_sock, resp_buf, resp_cap, 0);
+    return zmq_recv(bedrock->req_sock, resp_buf, resp_cap, 0);
 }
 
-static int32_t wasm_atmo_publish(wasm_exec_env_t exec_env,
+static int32_t wasm_bedrock_publish(wasm_exec_env_t exec_env,
                                  char *topic, int32_t topic_len,
                                  char *payload, int32_t payload_len) {
-    atmo_ctx_t *atmo = wasm_runtime_get_function_attachment(exec_env);
-    if (!atmo || !atmo->pub_sock) return -1;
-    zmq_send(atmo->pub_sock, topic, topic_len, ZMQ_SNDMORE);
-    return zmq_send(atmo->pub_sock, payload, payload_len, 0);
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->pub_sock) return -1;
+    zmq_send(bedrock->pub_sock, topic, topic_len, ZMQ_SNDMORE);
+    return zmq_send(bedrock->pub_sock, payload, payload_len, 0);
 }
 
-static int32_t wasm_atmo_serve_recv(wasm_exec_env_t exec_env,
+static int32_t wasm_bedrock_serve_recv(wasm_exec_env_t exec_env,
                                     char *buf, int32_t cap) {
-    atmo_ctx_t *atmo = wasm_runtime_get_function_attachment(exec_env);
-    if (!atmo || !atmo->rep_sock) return -1;
-    return zmq_recv(atmo->rep_sock, buf, cap, 0);
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->rep_sock) return -1;
+    return zmq_recv(bedrock->rep_sock, buf, cap, 0);
 }
 
-static int32_t wasm_atmo_serve_send(wasm_exec_env_t exec_env,
+static int32_t wasm_bedrock_serve_send(wasm_exec_env_t exec_env,
                                     char *resp, int32_t resp_len) {
-    atmo_ctx_t *atmo = wasm_runtime_get_function_attachment(exec_env);
-    if (!atmo || !atmo->rep_sock) return -1;
-    return zmq_send(atmo->rep_sock, resp, resp_len, 0);
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->rep_sock) return -1;
+    return zmq_send(bedrock->rep_sock, resp, resp_len, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,8 +124,8 @@ static int32_t wasm_atmo_serve_send(wasm_exec_env_t exec_env,
 
 #include "quickjs.h"
 
-/* JS binding: atmo.log(msg) */
-static JSValue js_atmo_log(JSContext *ctx, JSValueConst this_val,
+/* JS binding: bedrock.log(msg) */
+static JSValue js_bedrock_log(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
@@ -137,104 +137,104 @@ static JSValue js_atmo_log(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* JS binding: atmo.publish(topic, payload) -> bytes sent or -1 */
-static JSValue js_atmo_publish(JSContext *ctx, JSValueConst this_val,
+/* JS binding: bedrock.publish(topic, payload) -> bytes sent or -1 */
+static JSValue js_bedrock_publish(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
-    atmo_ctx_t *atmo = JS_GetContextOpaque(ctx);
-    if (!atmo || !atmo->pub_sock || argc < 2) return JS_NewInt32(ctx, -1);
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->pub_sock || argc < 2) return JS_NewInt32(ctx, -1);
 
     const char *topic = JS_ToCString(ctx, argv[0]);
     const char *payload = JS_ToCString(ctx, argv[1]);
     int rc = -1;
     if (topic && payload) {
-        zmq_send(atmo->pub_sock, topic, strlen(topic), ZMQ_SNDMORE);
-        rc = zmq_send(atmo->pub_sock, payload, strlen(payload), 0);
+        zmq_send(bedrock->pub_sock, topic, strlen(topic), ZMQ_SNDMORE);
+        rc = zmq_send(bedrock->pub_sock, payload, strlen(payload), 0);
     }
     if (topic) JS_FreeCString(ctx, topic);
     if (payload) JS_FreeCString(ctx, payload);
     return JS_NewInt32(ctx, rc);
 }
 
-/* JS binding: atmo.request(msg) -> response string or null */
-static JSValue js_atmo_request(JSContext *ctx, JSValueConst this_val,
+/* JS binding: bedrock.request(msg) -> response string or null */
+static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
-    atmo_ctx_t *atmo = JS_GetContextOpaque(ctx);
-    if (!atmo || !atmo->req_sock || argc < 1) return JS_NULL;
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->req_sock || argc < 1) return JS_NULL;
 
     const char *req = JS_ToCString(ctx, argv[0]);
     if (!req) return JS_NULL;
 
-    int rc = zmq_send(atmo->req_sock, req, strlen(req), 0);
+    int rc = zmq_send(bedrock->req_sock, req, strlen(req), 0);
     JS_FreeCString(ctx, req);
     if (rc < 0) return JS_NULL;
 
     char resp[8192];
-    rc = zmq_recv(atmo->req_sock, resp, sizeof(resp) - 1, 0);
+    rc = zmq_recv(bedrock->req_sock, resp, sizeof(resp) - 1, 0);
     if (rc < 0) return JS_NULL;
     resp[rc] = '\0';
     return JS_NewString(ctx, resp);
 }
 
-/* JS binding: atmo.serve_recv() -> request string or null */
-static JSValue js_atmo_serve_recv(JSContext *ctx, JSValueConst this_val,
+/* JS binding: bedrock.serve_recv() -> request string or null */
+static JSValue js_bedrock_serve_recv(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    atmo_ctx_t *atmo = JS_GetContextOpaque(ctx);
-    if (!atmo || !atmo->rep_sock) return JS_NULL;
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->rep_sock) return JS_NULL;
 
     char buf[8192];
-    int rc = zmq_recv(atmo->rep_sock, buf, sizeof(buf) - 1, 0);
+    int rc = zmq_recv(bedrock->rep_sock, buf, sizeof(buf) - 1, 0);
     if (rc < 0) return JS_NULL;
     buf[rc] = '\0';
     return JS_NewString(ctx, buf);
 }
 
-/* JS binding: atmo.serve_send(response) -> bytes sent or -1 */
-static JSValue js_atmo_serve_send(JSContext *ctx, JSValueConst this_val,
+/* JS binding: bedrock.serve_send(response) -> bytes sent or -1 */
+static JSValue js_bedrock_serve_send(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val;
-    atmo_ctx_t *atmo = JS_GetContextOpaque(ctx);
-    if (!atmo || !atmo->rep_sock || argc < 1) return JS_NewInt32(ctx, -1);
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->rep_sock || argc < 1) return JS_NewInt32(ctx, -1);
 
     const char *resp = JS_ToCString(ctx, argv[0]);
     if (!resp) return JS_NewInt32(ctx, -1);
 
-    int rc = zmq_send(atmo->rep_sock, resp, strlen(resp), 0);
+    int rc = zmq_send(bedrock->rep_sock, resp, strlen(resp), 0);
     JS_FreeCString(ctx, resp);
     return JS_NewInt32(ctx, rc);
 }
 
-/* JS binding: atmo.subscribe(filter) */
-static JSValue js_atmo_subscribe(JSContext *ctx, JSValueConst this_val,
+/* JS binding: bedrock.subscribe(filter) */
+static JSValue js_bedrock_subscribe(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
     (void)this_val;
-    atmo_ctx_t *atmo = JS_GetContextOpaque(ctx);
-    if (!atmo || !atmo->sub_sock || argc < 1) return JS_NewInt32(ctx, -1);
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->sub_sock || argc < 1) return JS_NewInt32(ctx, -1);
 
     const char *filter = JS_ToCString(ctx, argv[0]);
     if (!filter) return JS_NewInt32(ctx, -1);
 
-    int rc = zmq_setsockopt(atmo->sub_sock, ZMQ_SUBSCRIBE, filter, strlen(filter));
+    int rc = zmq_setsockopt(bedrock->sub_sock, ZMQ_SUBSCRIBE, filter, strlen(filter));
     JS_FreeCString(ctx, filter);
     return JS_NewInt32(ctx, rc);
 }
 
-/* JS binding: atmo.receive() -> {topic, payload} or null */
-static JSValue js_atmo_receive(JSContext *ctx, JSValueConst this_val,
+/* JS binding: bedrock.receive() -> {topic, payload} or null */
+static JSValue js_bedrock_receive(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    atmo_ctx_t *atmo = JS_GetContextOpaque(ctx);
-    if (!atmo || !atmo->sub_sock) return JS_NULL;
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->sub_sock) return JS_NULL;
 
     char topic[512] = {0};
     char payload[8192] = {0};
-    int rc = zmq_recv(atmo->sub_sock, topic, sizeof(topic) - 1, 0);
+    int rc = zmq_recv(bedrock->sub_sock, topic, sizeof(topic) - 1, 0);
     if (rc < 0) return JS_NULL;
     topic[rc < (int)sizeof(topic) ? rc : (int)sizeof(topic) - 1] = '\0';
 
-    rc = zmq_recv(atmo->sub_sock, payload, sizeof(payload) - 1, 0);
+    rc = zmq_recv(bedrock->sub_sock, payload, sizeof(payload) - 1, 0);
     if (rc < 0) return JS_NULL;
     payload[rc < (int)sizeof(payload) ? rc : (int)sizeof(payload) - 1] = '\0';
 
@@ -246,33 +246,33 @@ static JSValue js_atmo_receive(JSContext *ctx, JSValueConst this_val,
 
 static void js_child_run(strata_agent_def *def,
                          const char *event_json, int event_len) {
-    atmo_ctx_t atmo;
-    atmo_setup(&atmo, def);
+    bedrock_ctx_t bedrock;
+    bedrock_setup(&bedrock, def);
 
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt);
-    JS_SetContextOpaque(ctx, &atmo);
+    JS_SetContextOpaque(ctx, &bedrock);
 
-    /* Create atmo global object */
+    /* Create bedrock global object */
     JSValue global = JS_GetGlobalObject(ctx);
-    JSValue atmo_obj = JS_NewObject(ctx);
+    JSValue bedrock_obj = JS_NewObject(ctx);
 
-    JS_SetPropertyStr(ctx, atmo_obj, "log",
-        JS_NewCFunction(ctx, js_atmo_log, "log", 1));
-    JS_SetPropertyStr(ctx, atmo_obj, "publish",
-        JS_NewCFunction(ctx, js_atmo_publish, "publish", 2));
-    JS_SetPropertyStr(ctx, atmo_obj, "request",
-        JS_NewCFunction(ctx, js_atmo_request, "request", 1));
-    JS_SetPropertyStr(ctx, atmo_obj, "serve_recv",
-        JS_NewCFunction(ctx, js_atmo_serve_recv, "serve_recv", 0));
-    JS_SetPropertyStr(ctx, atmo_obj, "serve_send",
-        JS_NewCFunction(ctx, js_atmo_serve_send, "serve_send", 1));
-    JS_SetPropertyStr(ctx, atmo_obj, "subscribe",
-        JS_NewCFunction(ctx, js_atmo_subscribe, "subscribe", 1));
-    JS_SetPropertyStr(ctx, atmo_obj, "receive",
-        JS_NewCFunction(ctx, js_atmo_receive, "receive", 0));
+    JS_SetPropertyStr(ctx, bedrock_obj, "log",
+        JS_NewCFunction(ctx, js_bedrock_log, "log", 1));
+    JS_SetPropertyStr(ctx, bedrock_obj, "publish",
+        JS_NewCFunction(ctx, js_bedrock_publish, "publish", 2));
+    JS_SetPropertyStr(ctx, bedrock_obj, "request",
+        JS_NewCFunction(ctx, js_bedrock_request, "request", 1));
+    JS_SetPropertyStr(ctx, bedrock_obj, "serve_recv",
+        JS_NewCFunction(ctx, js_bedrock_serve_recv, "serve_recv", 0));
+    JS_SetPropertyStr(ctx, bedrock_obj, "serve_send",
+        JS_NewCFunction(ctx, js_bedrock_serve_send, "serve_send", 1));
+    JS_SetPropertyStr(ctx, bedrock_obj, "subscribe",
+        JS_NewCFunction(ctx, js_bedrock_subscribe, "subscribe", 1));
+    JS_SetPropertyStr(ctx, bedrock_obj, "receive",
+        JS_NewCFunction(ctx, js_bedrock_receive, "receive", 0));
 
-    JS_SetPropertyStr(ctx, global, "atmo", atmo_obj);
+    JS_SetPropertyStr(ctx, global, "bedrock", bedrock_obj);
 
     /* Set __event__ global with the trigger event */
     if (event_json && event_len > 0) {
@@ -296,7 +296,7 @@ static void js_child_run(strata_agent_def *def,
 
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
-    atmo_teardown(&atmo);
+    bedrock_teardown(&bedrock);
 }
 
 /* ------------------------------------------------------------------ */
@@ -403,14 +403,14 @@ int strata_js_register(strata_agent_host *host,
 }
 
 /* ------------------------------------------------------------------ */
-/*  WASM child runner (unchanged core, upgraded atmo)                  */
+/*  WASM child runner                  */
 /* ------------------------------------------------------------------ */
 
 static void wasm_child_run(strata_agent_def *def,
                            const char *event_json, int event_len) {
     char err[128];
-    atmo_ctx_t atmo;
-    atmo_setup(&atmo, def);
+    bedrock_ctx_t bedrock;
+    bedrock_setup(&bedrock, def);
 
     if (!wasm_runtime_init()) {
         fprintf(stderr, "wasm_runtime_init failed\n");
@@ -418,17 +418,17 @@ static void wasm_child_run(strata_agent_def *def,
     }
 
     static NativeSymbol natives[] = {
-        { "log",        (void *)wasm_atmo_log,        "(*~)",     NULL },
-        { "subscribe",  (void *)wasm_atmo_subscribe,   "(*~)i",    NULL },
-        { "receive",    (void *)wasm_atmo_receive,     "(*~*~)i",  NULL },
-        { "request",    (void *)wasm_atmo_request,     "(*~*~)i",  NULL },
-        { "publish",    (void *)wasm_atmo_publish,     "(*~*~)i",  NULL },
-        { "serve_recv", (void *)wasm_atmo_serve_recv,  "(*~)i",    NULL },
-        { "serve_send", (void *)wasm_atmo_serve_send,  "(*~)i",    NULL },
+        { "log",        (void *)wasm_bedrock_log,        "(*~)",     NULL },
+        { "subscribe",  (void *)wasm_bedrock_subscribe,   "(*~)i",    NULL },
+        { "receive",    (void *)wasm_bedrock_receive,     "(*~*~)i",  NULL },
+        { "request",    (void *)wasm_bedrock_request,     "(*~*~)i",  NULL },
+        { "publish",    (void *)wasm_bedrock_publish,     "(*~*~)i",  NULL },
+        { "serve_recv", (void *)wasm_bedrock_serve_recv,  "(*~)i",    NULL },
+        { "serve_send", (void *)wasm_bedrock_serve_send,  "(*~)i",    NULL },
     };
-    for (int i = 0; i < 7; i++) natives[i].attachment = &atmo;
+    for (int i = 0; i < 7; i++) natives[i].attachment = &bedrock;
 
-    if (!wasm_runtime_register_natives("atmo", natives, 7)) {
+    if (!wasm_runtime_register_natives("bedrock", natives, 7)) {
         fprintf(stderr, "register_natives failed\n");
         goto cleanup_wamr;
     }
@@ -488,7 +488,7 @@ cleanup_module:
 cleanup_wamr:
     wasm_runtime_destroy();
 cleanup:
-    atmo_teardown(&atmo);
+    bedrock_teardown(&bedrock);
 }
 
 /* ------------------------------------------------------------------ */
