@@ -39,6 +39,11 @@ if(NOT WAMR_INCLUDE_DIR OR NOT WAMR_LIBRARY)
     message(FATAL_ERROR "WAMR (wasm-micro-runtime) not found")
 endif()
 
+# OpenSSL (needed on Linux for SHA-256; macOS uses CommonCrypto)
+if(NOT APPLE)
+    find_package(OpenSSL REQUIRED)
+endif()
+
 # QuickJS (vendored)
 add_library(quickjs
     vendor/quickjs/quickjs.c
@@ -76,6 +81,9 @@ target_include_directories(strata PUBLIC
     ${WAMR_INCLUDE_DIR}
 )
 target_link_libraries(strata quickjs ${SQLITE3_LIBRARY} ${ZMQ_LIBRARY} ${WAMR_LIBRARY})
+if(NOT APPLE)
+    target_link_libraries(strata OpenSSL::Crypto)
+endif()
 
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)
@@ -137,6 +145,10 @@ set_target_properties(strata_cli PROPERTIES OUTPUT_NAME "strata")
 add_executable(strata_den_cli src/cli_strata_den.c)
 target_link_libraries(strata_den_cli strata)
 set_target_properties(strata_den_cli PROPERTIES OUTPUT_NAME "strata-den")
+
+add_executable(strata_homestead_cli src/cli_strata_homestead.c $<TARGET_OBJECTS:store_service_lib>)
+target_link_libraries(strata_homestead_cli strata)
+set_target_properties(strata_homestead_cli PROPERTIES OUTPUT_NAME "strata-homestead")
 
 # Examples
 add_executable(listener examples/listener.c)

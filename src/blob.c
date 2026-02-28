@@ -3,7 +3,14 @@
 #include <stdio.h>
 #include <time.h>
 #include <sqlite3.h>
+#ifdef __APPLE__
 #include <CommonCrypto/CommonDigest.h>
+#else
+#include <openssl/sha.h>
+#define CC_SHA256_DIGEST_LENGTH SHA256_DIGEST_LENGTH
+#define CC_SHA256(data, len, hash) SHA256((const unsigned char *)(data), (len), (hash))
+typedef unsigned int CC_LONG;
+#endif
 #include "strata/blob.h"
 #include "strata/context.h"
 

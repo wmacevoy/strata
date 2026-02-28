@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  homestead:
+    build: .
+    ports:
+      - "6000:6000"
+    volumes:
+      - strata-data:/var/strata
+    environment:
+      STRATA_DB_PATH: /var/strata/strata.db
+      STRATA_STORE_ENDPOINT: "tcp://127.0.0.1:5560"
+      STRATA_VILLAGE_ENDPOINT: "tcp://0.0.0.0:6000"
+
+volumes:
+  strata-data:
