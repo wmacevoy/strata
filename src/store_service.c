@@ -16,6 +16,13 @@
  *   BLOB_TAG:  {"action":"blob_tag","id":"...","tag":"..."}
  *   BLOB_UNTAG:{"action":"blob_untag","id":"...","tag":"..."}
  *   BLOB_TAGS: {"action":"blob_tags","id":"..."}
+ *
+ * Protocol (admin):
+ *   REPO_CREATE: {"action":"repo_create","repo":"...","name":"..."}
+ *   ROLE_ASSIGN: {"action":"role_assign","entity":"...","role":"...","repo":"..."}
+ *   ROLE_REVOKE: {"action":"role_revoke","entity":"...","role":"...","repo":"..."}
+ *   PRIVILEGE_GRANT:  {"action":"privilege_grant","entity":"...","privilege":"..."}
+ *   PRIVILEGE_REVOKE: {"action":"privilege_revoke","entity":"...","privilege":"..."}
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,11 +53,9 @@ static int list_cb(const strata_artifact *a, void *userdata) {
         n = snprintf(st->buf + st->pos, st->cap - st->pos, ",");
         st->pos += n;
     }
-    /* Escape content for JSON (simple: just truncate at first quote) */
-    char safe_content[4096];
-    int clen = (int)(a->content_len < sizeof(safe_content) - 1 ? a->content_len : sizeof(safe_content) - 1);
-    memcpy(safe_content, a->content, clen);
-    safe_content[clen] = '\0';
+    char safe_content[8192];
+    json_escape((const char *)a->content, (int)a->content_len,
+                safe_content, sizeof(safe_content));
 
     n = snprintf(st->buf + st->pos, st->cap - st->pos,
         "{\"id\":\"%s\",\"author\":\"%s\",\"type\":\"%s\","
@@ -69,10 +74,9 @@ static int blob_find_cb(const strata_blob *b, void *userdata) {
         n = snprintf(st->buf + st->pos, st->cap - st->pos, ",");
         st->pos += n;
     }
-    char safe[4096];
-    int clen = (int)(b->content_len < sizeof(safe) - 1 ? b->content_len : sizeof(safe) - 1);
-    memcpy(safe, b->content, clen);
-    safe[clen] = '\0';
+    char safe[8192];
+    json_escape((const char *)b->content, (int)b->content_len,
+                safe, sizeof(safe));
 
     n = snprintf(st->buf + st->pos, st->cap - st->pos,
         "{\"id\":\"%s\",\"author\":\"%s\","
@@ -137,10 +141,9 @@ static void handle_request(strata_store *store, const char *req, int req_len,
         strata_ctx *ctx = strata_ctx_create(entity);
         strata_artifact out;
         if (strata_artifact_get(store, ctx, id, &out) == 0) {
-            char safe[4096];
-            int clen = (int)(out.content_len < sizeof(safe) - 1 ? out.content_len : sizeof(safe) - 1);
-            memcpy(safe, out.content, clen);
-            safe[clen] = '\0';
+            char safe[8192];
+            json_escape((const char *)out.content, (int)out.content_len,
+                        safe, sizeof(safe));
             snprintf(resp, resp_cap,
                 "{\"ok\":true,\"id\":\"%s\",\"content\":\"%s\","
                 "\"author\":\"%s\",\"type\":\"%s\",\"created_at\":\"%s\"}",
@@ -187,10 +190,9 @@ static void handle_request(strata_store *store, const char *req, int req_len,
         strata_ctx *ctx = strata_ctx_create(entity);
         strata_blob out;
         if (strata_blob_get(store, ctx, id, &out) == 0) {
-            char safe[4096];
-            int clen = (int)(out.content_len < sizeof(safe) - 1 ? out.content_len : sizeof(safe) - 1);
-            memcpy(safe, out.content, clen);
-            safe[clen] = '\0';
+            char safe[8192];
+            json_escape((const char *)out.content, (int)out.content_len,
+                        safe, sizeof(safe));
             snprintf(resp, resp_cap,
                 "{\"ok\":true,\"id\":\"%s\",\"content\":\"%s\","
                 "\"author\":\"%s\",\"created_at\":\"%s\"}",
@@ -254,6 +256,58 @@ static void handle_request(strata_store *store, const char *req, int req_len,
         } else {
             snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"blob_tags failed\"}");
         }
+
+    } else if (strcmp(action, "repo_create") == 0) {
+        char repo[256] = {0}, name[256] = {0};
+        json_get_string(req, "repo", repo, sizeof(repo));
+        json_get_string(req, "name", name, sizeof(name));
+
+        if (strata_repo_create(store, repo, name) == 0)
+            snprintf(resp, resp_cap, "{\"ok\":true,\"repo\":\"%s\"}", repo);
+        else
+            snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"repo_create failed\"}");
+
+    } else if (strcmp(action, "role_assign") == 0) {
+        char entity[256] = {0}, role[256] = {0}, repo[256] = {0};
+        json_get_string(req, "entity", entity, sizeof(entity));
+        json_get_string(req, "role", role, sizeof(role));
+        json_get_string(req, "repo", repo, sizeof(repo));
+
+        if (strata_role_assign(store, entity, role, repo) == 0)
+            snprintf(resp, resp_cap, "{\"ok\":true}");
+        else
+            snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"role_assign failed\"}");
+
+    } else if (strcmp(action, "role_revoke") == 0) {
+        char entity[256] = {0}, role[256] = {0}, repo[256] = {0};
+        json_get_string(req, "entity", entity, sizeof(entity));
+        json_get_string(req, "role", role, sizeof(role));
+        json_get_string(req, "repo", repo, sizeof(repo));
+
+        if (strata_role_revoke(store, entity, role, repo) == 0)
+            snprintf(resp, resp_cap, "{\"ok\":true}");
+        else
+            snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"role_revoke failed\"}");
+
+    } else if (strcmp(action, "privilege_grant") == 0) {
+        char entity[256] = {0}, privilege[256] = {0};
+        json_get_string(req, "entity", entity, sizeof(entity));
+        json_get_string(req, "privilege", privilege, sizeof(privilege));
+
+        if (strata_role_assign(store, entity, privilege, "_system") == 0)
+            snprintf(resp, resp_cap, "{\"ok\":true}");
+        else
+            snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"privilege_grant failed\"}");
+
+    } else if (strcmp(action, "privilege_revoke") == 0) {
+        char entity[256] = {0}, privilege[256] = {0};
+        json_get_string(req, "entity", entity, sizeof(entity));
+        json_get_string(req, "privilege", privilege, sizeof(privilege));
+
+        if (strata_role_revoke(store, entity, privilege, "_system") == 0)
+            snprintf(resp, resp_cap, "{\"ok\":true}");
+        else
+            snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"privilege_revoke failed\"}");
 
     } else {
         snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"unknown action\"}");

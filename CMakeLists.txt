@@ -129,6 +129,10 @@ add_executable(test_village test/test_village.c $<TARGET_OBJECTS:store_service_l
 target_link_libraries(test_village strata)
 add_test(NAME test_village COMMAND test_village)
 
+add_executable(test_claud_homestead test/test_claud_homestead.c $<TARGET_OBJECTS:store_service_lib>)
+target_link_libraries(test_claud_homestead strata)
+add_test(NAME test_claud_homestead COMMAND test_claud_homestead)
+
 # Village daemon
 add_executable(village_daemon src/village.c)
 target_include_directories(village_daemon PRIVATE
