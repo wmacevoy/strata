@@ -115,11 +115,11 @@ add_test(NAME test_change COMMAND test_change)
 
 add_executable(test_den test/test_den.c)
 target_link_libraries(test_den strata)
-add_test(NAME test_den COMMAND test_den)
+add_test(NAME test_den COMMAND test_den WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_board test/test_board.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_board strata)
-add_test(NAME test_board COMMAND test_board)
+add_test(NAME test_board COMMAND test_board WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_blob test/test_blob.c)
 target_link_libraries(test_blob strata)
@@ -127,15 +127,15 @@ add_test(NAME test_blob COMMAND test_blob)
 
 add_executable(test_village test/test_village.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_village strata)
-add_test(NAME test_village COMMAND test_village)
+add_test(NAME test_village COMMAND test_village WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_claud_homestead test/test_claud_homestead.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_claud_homestead strata)
-add_test(NAME test_claud_homestead COMMAND test_claud_homestead)
+add_test(NAME test_claud_homestead COMMAND test_claud_homestead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_collaboration test/test_collaboration.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_collaboration strata)
-add_test(NAME test_collaboration COMMAND test_collaboration)
+add_test(NAME test_collaboration COMMAND test_collaboration WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # Village daemon
 add_executable(village_daemon src/village.c)
