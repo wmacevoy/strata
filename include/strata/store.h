@@ -57,4 +57,13 @@ void strata_artifact_cleanup(strata_artifact *a);
 int strata_has_privilege(strata_store *store, const char *entity_id,
                          const char *privilege);
 
+/* Entity registration + authentication.
+ * Register creates an entity with a token. Returns 0 on success.
+ * out_token is filled with the generated token (hex, 65 bytes incl null).
+ * Authenticate checks entity_id + token. Returns 1 if valid, 0 if not. */
+int strata_entity_register(strata_store *store, const char *entity_id,
+                            char *out_token);
+int strata_entity_authenticate(strata_store *store, const char *entity_id,
+                                const char *token);
+
 #endif

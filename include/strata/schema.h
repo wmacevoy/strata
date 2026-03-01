@@ -8,6 +8,11 @@
     "  name       TEXT NOT NULL," \
     "  created_at TEXT NOT NULL" \
     ");" \
+    "CREATE TABLE IF NOT EXISTS entities (" \
+    "  entity_id   TEXT PRIMARY KEY," \
+    "  token_hash  TEXT NOT NULL," \
+    "  created_at  TEXT NOT NULL" \
+    ");" \
     "CREATE TABLE IF NOT EXISTS artifacts (" \
     "  artifact_id   TEXT PRIMARY KEY," \
     "  repo_id       TEXT NOT NULL REFERENCES repos(repo_id)," \

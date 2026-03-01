@@ -133,6 +133,10 @@ add_executable(test_claud_homestead test/test_claud_homestead.c $<TARGET_OBJECTS
 target_link_libraries(test_claud_homestead strata)
 add_test(NAME test_claud_homestead COMMAND test_claud_homestead)
 
+add_executable(test_collaboration test/test_collaboration.c $<TARGET_OBJECTS:store_service_lib>)
+target_link_libraries(test_collaboration strata)
+add_test(NAME test_collaboration COMMAND test_collaboration)
+
 # Village daemon
 add_executable(village_daemon src/village.c)
 target_include_directories(village_daemon PRIVATE
@@ -153,6 +157,10 @@ set_target_properties(strata_den_cli PROPERTIES OUTPUT_NAME "strata-den")
 add_executable(strata_homestead_cli src/cli_strata_homestead.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(strata_homestead_cli strata)
 set_target_properties(strata_homestead_cli PROPERTIES OUTPUT_NAME "strata-homestead")
+
+add_executable(strata_human_cli src/cli_human_den.c)
+target_link_libraries(strata_human_cli strata)
+set_target_properties(strata_human_cli PROPERTIES OUTPUT_NAME "strata-human")
 
 # Examples
 add_executable(listener examples/listener.c)

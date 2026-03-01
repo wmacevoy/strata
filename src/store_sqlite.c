@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 #include <sqlite3.h>
 #include "strata/store.h"
 #include "strata/context.h"
@@ -363,4 +364,77 @@ int strata_has_privilege(strata_store *store, const char *entity_id,
     int has = (sqlite3_step(stmt) == SQLITE_ROW) ? 1 : 0;
     sqlite3_finalize(stmt);
     return has;
+}
+
+/* Generate a random 32-byte token, output as 64-char hex string */
+static void generate_token(char out[65]) {
+    unsigned char raw[32];
+    /* Use /dev/urandom for token generation */
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        fread(raw, 1, 32, f);
+        fclose(f);
+    } else {
+        /* Fallback: seed from time + pid (not cryptographically ideal) */
+        srand((unsigned)(time(NULL) ^ getpid()));
+        for (int i = 0; i < 32; i++) raw[i] = (unsigned char)(rand() & 0xFF);
+    }
+    for (int i = 0; i < 32; i++)
+        sprintf(out + i * 2, "%02x", raw[i]);
+    out[64] = '\0';
+}
+
+int strata_entity_register(strata_store *store, const char *entity_id,
+                            char *out_token) {
+    if (!store || !entity_id || !out_token) return -1;
+
+    /* Generate token */
+    char token[65];
+    generate_token(token);
+
+    /* Hash the token for storage */
+    char token_hash[65];
+    sha256_hex(token, 64, token_hash);
+
+    char ts[32];
+    iso8601_now(ts);
+
+    const char *sql =
+        "INSERT INTO entities (entity_id, token_hash, created_at) VALUES (?, ?, ?)";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+
+    sqlite3_bind_text(stmt, 1, entity_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, token_hash, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, ts, -1, SQLITE_STATIC);
+
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+
+    if (rc == 0)
+        memcpy(out_token, token, 65);
+    return rc;
+}
+
+int strata_entity_authenticate(strata_store *store, const char *entity_id,
+                                const char *token) {
+    if (!store || !entity_id || !token) return 0;
+
+    /* Hash the provided token */
+    char token_hash[65];
+    sha256_hex(token, strlen(token), token_hash);
+
+    const char *sql =
+        "SELECT 1 FROM entities WHERE entity_id = ? AND token_hash = ? LIMIT 1";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(store->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_text(stmt, 1, entity_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, token_hash, -1, SQLITE_STATIC);
+
+    int valid = (sqlite3_step(stmt) == SQLITE_ROW) ? 1 : 0;
+    sqlite3_finalize(stmt);
+    return valid;
 }

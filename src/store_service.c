@@ -23,6 +23,16 @@
  *   ROLE_REVOKE: {"action":"role_revoke","entity":"...","role":"...","repo":"..."}
  *   PRIVILEGE_GRANT:  {"action":"privilege_grant","entity":"...","privilege":"..."}
  *   PRIVILEGE_REVOKE: {"action":"privilege_revoke","entity":"...","privilege":"..."}
+ *   PRIVILEGE_CHECK:  {"action":"privilege_check","entity":"...","privilege":"..."}
+ *   INIT:             {"action":"init"}
+ *
+ * Protocol (identity):
+ *   ENTITY_REGISTER:     {"action":"entity_register","entity":"..."}
+ *   ENTITY_AUTHENTICATE: {"action":"entity_authenticate","entity":"...","token":"..."}
+ *
+ * Authentication: any request may include "token":"..." field.
+ * If present, the store verifies the token against the entity's stored hash.
+ * If verification fails, the request is rejected.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,7 +102,48 @@ static void handle_request(strata_store *store, const char *req, int req_len,
     char action[32] = {0};
     json_get_string(req, "action", action, sizeof(action));
 
-    if (strcmp(action, "put") == 0) {
+    /* Token authentication: if a token is provided, verify it.
+     * entity_register and entity_authenticate are exempt (pre-auth). */
+    if (strcmp(action, "entity_register") != 0 &&
+        strcmp(action, "entity_authenticate") != 0) {
+        char token[128] = {0};
+        if (json_get_string(req, "token", token, sizeof(token)) >= 0 && token[0]) {
+            /* Token provided — must verify. Extract entity from various fields. */
+            char auth_entity[256] = {0};
+            if (json_get_string(req, "author", auth_entity, sizeof(auth_entity)) < 0)
+                json_get_string(req, "entity", auth_entity, sizeof(auth_entity));
+            if (auth_entity[0] && !strata_entity_authenticate(store, auth_entity, token)) {
+                snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"authentication failed\"}");
+                return;
+            }
+        }
+    }
+
+    if (strcmp(action, "entity_register") == 0) {
+        char entity[256] = {0};
+        json_get_string(req, "entity", entity, sizeof(entity));
+        if (!entity[0]) {
+            snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"entity required\"}");
+            return;
+        }
+        char token[65];
+        if (strata_entity_register(store, entity, token) == 0)
+            snprintf(resp, resp_cap,
+                "{\"ok\":true,\"entity\":\"%s\",\"token\":\"%s\"}", entity, token);
+        else
+            snprintf(resp, resp_cap,
+                "{\"ok\":false,\"error\":\"entity_register failed (already exists?)\"}");
+
+    } else if (strcmp(action, "entity_authenticate") == 0) {
+        char entity[256] = {0}, token[128] = {0};
+        json_get_string(req, "entity", entity, sizeof(entity));
+        json_get_string(req, "token", token, sizeof(token));
+        int valid = strata_entity_authenticate(store, entity, token);
+        snprintf(resp, resp_cap,
+            "{\"ok\":true,\"entity\":\"%s\",\"valid\":%s}",
+            entity, valid ? "true" : "false");
+
+    } else if (strcmp(action, "put") == 0) {
         char repo[256] = {0}, type[64] = {0}, content[4096] = {0}, author[256] = {0};
         json_get_string(req, "repo", repo, sizeof(repo));
         json_get_string(req, "type", type, sizeof(type));
@@ -308,6 +359,20 @@ static void handle_request(strata_store *store, const char *req, int req_len,
             snprintf(resp, resp_cap, "{\"ok\":true}");
         else
             snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"privilege_revoke failed\"}");
+
+    } else if (strcmp(action, "privilege_check") == 0) {
+        char entity[256] = {0}, privilege[256] = {0};
+        json_get_string(req, "entity", entity, sizeof(entity));
+        json_get_string(req, "privilege", privilege, sizeof(privilege));
+
+        int has = strata_has_privilege(store, entity, privilege);
+        snprintf(resp, resp_cap,
+            "{\"ok\":true,\"entity\":\"%s\",\"privilege\":\"%s\",\"has\":%s}",
+            entity, privilege, has ? "true" : "false");
+
+    } else if (strcmp(action, "init") == 0) {
+        strata_store_init(store);
+        snprintf(resp, resp_cap, "{\"ok\":true}");
 
     } else {
         snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"unknown action\"}");
