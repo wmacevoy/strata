@@ -38,7 +38,57 @@ int store_service_run(const char *db_path, const char *endpoint);
 #define TEST(name) do { printf("  %-55s", name); fflush(stdout); } while(0)
 #define PASS()     do { printf("PASS\n"); fflush(stdout); } while(0)
 
-static pid_t store_pid;
+static pid_t store_pid = -1;
+static pid_t gk_pid = -1;
+static void *g_zmq_ctx = NULL;
+static void *g_req_sock = NULL;
+static strata_den_host *g_host = NULL;
+
+static void cleanup(void) {
+    if (gk_pid > 0) { kill(gk_pid, SIGTERM); waitpid(gk_pid, NULL, 0); gk_pid = -1; }
+    if (g_req_sock) { zmq_close(g_req_sock); g_req_sock = NULL; }
+    if (g_zmq_ctx) { zmq_ctx_destroy(g_zmq_ctx); g_zmq_ctx = NULL; }
+    if (g_host) { strata_den_host_free(g_host); g_host = NULL; }
+    if (store_pid > 0) { kill(store_pid, SIGINT); waitpid(store_pid, NULL, 0); store_pid = -1; }
+    unlink(DB_PATH);
+    unlink(DB_PATH "-wal");
+    unlink(DB_PATH "-shm");
+}
+
+static void abort_handler(int sig) {
+    (void)sig;
+    cleanup();
+    _exit(1);
+}
+
+static int wait_for_store(const char *endpoint, int max_retries) {
+    void *ctx = zmq_ctx_new();
+    void *sock = zmq_socket(ctx, ZMQ_REQ);
+    int timeout = 500;
+    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
+    int linger = 0;
+    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
+    zmq_connect(sock, endpoint);
+
+    int ready = 0;
+    for (int i = 0; i < max_retries && !ready; i++) {
+        usleep(100000);
+        const char *probe = "{\"action\":\"init\"}";
+        if (zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+            char resp[256];
+            int rc = zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            if (rc > 0) {
+                resp[rc] = '\0';
+                if (strstr(resp, "\"ok\":true")) ready = 1;
+            }
+        }
+    }
+
+    zmq_close(sock);
+    zmq_ctx_destroy(ctx);
+    return ready;
+}
 
 /* ---- Store service ---- */
 
@@ -49,24 +99,28 @@ static void start_store(void) {
     strata_store_init(store);
     strata_store_close(store);
 
+    fflush(stdout);
+    fflush(stderr);
     store_pid = fork();
     assert(store_pid >= 0);
     if (store_pid == 0) {
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
         store_service_run(DB_PATH, STORE_ENDPOINT);
         _exit(0);
     }
-    usleep(200000);
+    assert(wait_for_store(STORE_ENDPOINT, 20));
 }
 
 static void stop_store(void) {
-    kill(store_pid, SIGINT);
-    waitpid(store_pid, NULL, 0);
+    if (store_pid > 0) {
+        kill(store_pid, SIGINT);
+        waitpid(store_pid, NULL, 0);
+        store_pid = -1;
+    }
 }
 
 /* ---- ZMQ request helper ---- */
-
-static void *g_zmq_ctx = NULL;
-static void *g_req_sock = NULL;
 
 static void connect_store(void) {
     g_zmq_ctx = zmq_ctx_new();
@@ -114,6 +168,10 @@ static int zmq_one_request(const char *endpoint, const char *req_json,
 /* ================================================================== */
 
 int main(void) {
+    signal(SIGABRT, abort_handler);
+    signal(SIGTERM, abort_handler);
+    atexit(cleanup);
+
     unlink(DB_PATH);
     unlink(DB_PATH "-wal");
     unlink(DB_PATH "-shm");
@@ -345,15 +403,17 @@ int main(void) {
 
     /* Register and spawn gatekeeper den */
     TEST("spawn gatekeeper den");
-    strata_den_host *host = strata_den_host_create();
-    assert(host != NULL);
-    rc = strata_den_js_register(host, "gatekeeper", "dens/gatekeeper.js",
+    g_host = strata_den_host_create();
+    assert(g_host != NULL);
+    rc = strata_den_js_register(g_host, "gatekeeper", "dens/gatekeeper.js",
                                  NULL, STORE_ENDPOINT,
                                  GK_PUB, GK_REP);
     assert(rc == 0);
-    pid_t gk_pid = strata_den_spawn(host, "gatekeeper", "{}", 2);
+    fflush(stdout);
+    fflush(stderr);
+    gk_pid = strata_den_spawn(g_host, "gatekeeper", "{}", 2);
     assert(gk_pid > 0);
-    usleep(300000);
+    usleep(500000);
     PASS();
 
     /* Builder-bot requests to join project-beta */
@@ -447,16 +507,7 @@ int main(void) {
     assert(strstr(resp, "\"has\":false") != NULL);
     PASS();
 
-    /* Cleanup */
-    kill(gk_pid, SIGTERM);
-    waitpid(gk_pid, NULL, 0);
-    strata_den_host_free(host);
-    disconnect_store();
-    stop_store();
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
-
+    /* Cleanup happens via atexit */
     printf("ALL TESTS PASSED\n");
     return 0;
 }

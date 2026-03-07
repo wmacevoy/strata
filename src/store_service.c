@@ -312,7 +312,6 @@ static void handle_request(strata_store *store, const char *req, int req_len,
         char repo[256] = {0}, name[256] = {0};
         json_get_string(req, "repo", repo, sizeof(repo));
         json_get_string(req, "name", name, sizeof(name));
-
         if (strata_repo_create(store, repo, name) == 0)
             snprintf(resp, resp_cap, "{\"ok\":true,\"repo\":\"%s\"}", repo);
         else

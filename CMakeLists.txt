@@ -162,6 +162,10 @@ add_executable(strata_human_cli src/cli_human_den.c)
 target_link_libraries(strata_human_cli strata)
 set_target_properties(strata_human_cli PROPERTIES OUTPUT_NAME "strata-human")
 
+# Warren's Village
+add_executable(warren_village src/warren_village.c $<TARGET_OBJECTS:store_service_lib>)
+target_link_libraries(warren_village strata)
+
 # Examples
 add_executable(listener examples/listener.c)
 target_link_libraries(listener strata)
