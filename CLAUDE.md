@@ -46,7 +46,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | inch.js | The precise one: counts, measures, local SQLite observations table, town-hall aware |
 | loom.js | The synthesizer: tracks word threads, weaves patterns, local SQLite threads/tapestry tables |
 | board.js | Message board: POST/LIST via REP, persists as artifacts, PUBs notifications |
-| claud-homestead.js | Vocation den: builds homesteads, pickle/unpickle state via blobs |
+| claud-homestead.js | Vocation den: builds homesteads, local SQLite tables (homesteads, dens_deployed, repos_tracked) |
 | gatekeeper.js | Access control: request_join/approve/deny, "destination decides" pattern |
 | echo.wat | Minimal WASM test: on_event() trigger, logs via bedrock |
 
@@ -59,7 +59,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | test_den.c | Den host, register WASM (echo.wat), spawn, reap |
 | test_board.c | E2E: store_service + board.js via QuickJS, POST/LIST/PUB |
 | test_village.c | Local clone, relay, multi-process bedrock |
-| test_claud_homestead.c | Homestead den lifecycle, pickle/unpickle, respawn persistence |
+| test_claud_homestead.c | Homestead den lifecycle, local db persistence, respawn restore |
 | test_collaboration.c | Full integration: entity auth, gatekeeper, journeyman pattern |
 
 ## Database Schema
@@ -171,16 +171,17 @@ Vendored: QuickJS (vendor/quickjs/).
 - Capability injection, not request. Host decides what den gets.
 - Immutable audit trail. No rebase, no history rewrite.
 - Storage-agnostic core. No direct SQLite calls in business logic (store interface only).
-- Six foundations only: SQLite, Fossil model, WAMR, ZMQ, AEAD AES, Shamir SSS.
+- Six foundations only: SQLite, ZMQ, WAMR, QuickJS, AEAD AES, Shamir SSS.
 
 ## Architecture (Target)
 
 ```
-WAMR sandboxes (dens)           ← bidirectional fencing
-ZMQ bedrock (communication)     ← ACL, encrypted, audited
-AEAD + Shamir (crypto + trust)  ← role-based envelope encryption
-SQLite / PostgreSQL (storage)   ← village → city migration
-Fossil-model repos (audit)      ← immutable timeline
+Fossil (human-facing)           ← timeline, diffs, browsable repos
+Vocations (capabilities)        ← dens that serve tools (code-smith, etc.)
+Dens (sandboxed execution)      ← WAMR/QuickJS, bedrock API, preserve/restore
+Services (bridges)              ← store_service, village daemon
+Store (access control)          ← repos, roles, entities, privileges (SQLite or PostgreSQL)
+Blob + Message (foundation)     ← content-addressed blobs, AEAD encrypted at rest, ZMQ messaging
 ```
 
 ## Build Phases
