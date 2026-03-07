@@ -362,6 +362,39 @@ Local SQLite tables: `homesteads`, `dens_deployed`, `repos_tracked`.
 
 Key file: `dens/claud-homestead.js`.
 
+### cobbler (planned — heavyweight, optional)
+
+WASM compiler vocation. Dens building dens. Takes source code in, produces `.wasm` binary out, stored as a blob ready for preserve/restore deployment.
+
+**Two-phase approach:**
+
+**Phase 1 (now):** C vocation service linking libclang/LLVM. LLVM already has a mature WASM backend — no architecture mismatch, no new runtime. Heavyweight (~100MB LLVM dependency) but works today. Same pattern as code-smith: ZMQ REP loop, JSON dispatch, sandboxed output.
+
+```
+C source → cobbler (libclang/LLVM) → .wasm blob → preservable den
+```
+
+| Action | Purpose |
+|--------|---------|
+| `compile` | Compile source to `.wasm`, store as blob |
+| `compile_file` | Compile from path (via code-smith) |
+| `discover` | List supported languages and options |
+
+```json
+{"action":"compile", "source":"...", "lang":"c", "exports":["serve"]}
+→ {"ok":true, "blob_id":"sha256...", "size":4096}
+```
+
+The output blob is a `.wasm` binary — a complete den ready for preserve/restore. Combined with claud-homestead's `deploy_den`, the full cycle is: write C → cobbler compiles to WASM → blob stored → claud-homestead deploys to target village → den restored and running.
+
+**Phase 2 (later):** Self-hosting compiler inside the sandbox. Two candidate paths:
+
+- **TCC with WASM backend** — TCC is ~100KB, self-hosting, but currently targets register machines (x86, ARM, RISC-V), not WASM's stack machine. A WASM codegen backend for TCC is real work but bounded. If achieved: TCC compiled to WASM, running in WAMR, compiling C to WASM. Fully sandboxed, self-hosting cobbler.
+
+- **RISC-V as alternative sandbox** — TCC already has a RISC-V backend. A lightweight RISC-V interpreter (~2-3K lines of C) provides the same sandboxing properties as WAMR (memory isolation, capability injection via ecalls, no host escape). TCC→RISC-V is trivial; self-hosting is immediate. Trade-off: adds a third runtime (`STRATA_MODE_RV32`) but avoids the stack machine mismatch entirely. Interpreter performance is the concern — would need JIT/AOT eventually.
+
+Phase 2 replaces the LLVM dependency with something small enough to live inside the sandbox. The cobbler's REP interface stays the same — only the backend changes.
+
 ### To add a new vocation
 
 1. Write a den (JS or C) that handles domain-specific actions via REP socket
@@ -454,7 +487,7 @@ Dens don't talk directly to each other. Two patterns:
 | 2: Store | Repos, artifacts, roles, privileges, entity auth | Shamir trust tiers, vouch system, attribute engine |
 | 3: Services | store_service, village daemon, code-smith | Encrypted sync, ACL enforcement on ZMQ |
 | 4: Dens | JS + WASM runtimes, bedrock API, basic local_db save/load | Rich preserve (source + state + restore plan), quarantine |
-| 5: Vocations | code-smith, claud-homestead | word-smith, mail-smith, marketplace |
+| 5: Vocations | code-smith, claud-homestead | cobbler (LLVM→WASM compiler, then self-hosting), word-smith, mail-smith |
 | 6: Fossil | strata-human REPL, basic artifact browsing | Full timeline/diff/branch UI |
 
 ### Rich Preserve/Restore (target)
