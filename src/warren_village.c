@@ -19,10 +19,12 @@
 #include "strata/den.h"
 
 extern int store_service_run(const char *db_path, const char *endpoint);
+extern int code_smith_run(const char *endpoint, const char *root, int readonly);
 
 #define DB_PATH       "/tmp/warren_village.db"
 #define PID_FILE      "/tmp/warren_village.pid"
 #define STORE_EP      "tcp://127.0.0.1:5560"
+#define SMITH_EP      "tcp://127.0.0.1:5590"
 
 #define GEE_REP       "tcp://127.0.0.1:5570"
 #define INCH_REP      "tcp://127.0.0.1:5571"
@@ -34,6 +36,7 @@ extern int store_service_run(const char *db_path, const char *endpoint);
 
 static volatile int running = 1;
 static pid_t store_pid = -1;
+static pid_t smith_pid = -1;
 static pid_t gee_pid = -1;
 static pid_t inch_pid = -1;
 static pid_t loom_pid = -1;
@@ -52,6 +55,7 @@ static void cleanup(void) {
     kill_child(&inch_pid);
     kill_child(&loom_pid);
     if (host) { strata_den_host_free(host); host = NULL; }
+    kill_child(&smith_pid);
     kill_child(&store_pid);
     unlink(PID_FILE);
 }
@@ -177,6 +181,24 @@ int main(void) {
     }
     fprintf(stderr, "village: store ready\n");
 
+    /* Fork code-smith vocation */
+    fflush(stdout);
+    fflush(stderr);
+    smith_pid = fork();
+    if (smith_pid < 0) { perror("fork smith"); exit(1); }
+    if (smith_pid == 0) {
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        _exit(code_smith_run(SMITH_EP, ".", 0));
+    }
+
+    fprintf(stderr, "village: waiting for code-smith on %s\n", SMITH_EP);
+    if (!wait_for_store(SMITH_EP, 20)) {
+        fprintf(stderr, "village: code-smith failed to start\n");
+        exit(1);
+    }
+    fprintf(stderr, "village: code-smith ready\n");
+
     /* Register dens */
     host = strata_den_host_create();
 
@@ -217,10 +239,11 @@ int main(void) {
     /* Write PID file and report */
     write_pid_file();
     fprintf(stderr, "\nvillage: ready\n");
-    fprintf(stderr, "  store:  %s\n", STORE_EP);
-    fprintf(stderr, "  gee:    REP=%s PUB=%s\n", GEE_REP, GEE_PUB);
-    fprintf(stderr, "  inch:   REP=%s PUB=%s\n", INCH_REP, INCH_PUB);
-    fprintf(stderr, "  loom:   REP=%s PUB=%s\n", LOOM_REP, LOOM_PUB);
+    fprintf(stderr, "  store:      %s\n", STORE_EP);
+    fprintf(stderr, "  code-smith: %s\n", SMITH_EP);
+    fprintf(stderr, "  gee:        REP=%s PUB=%s\n", GEE_REP, GEE_PUB);
+    fprintf(stderr, "  inch:       REP=%s PUB=%s\n", INCH_REP, INCH_PUB);
+    fprintf(stderr, "  loom:       REP=%s PUB=%s\n", LOOM_REP, LOOM_PUB);
     fprintf(stderr, "\n");
 
     /* Block until signaled */
@@ -231,6 +254,7 @@ int main(void) {
         if (died > 0) {
             fprintf(stderr, "village: child %d exited\n", died);
             if (died == store_pid) { store_pid = -1; running = 0; }
+            if (died == smith_pid) smith_pid = -1;
             if (died == gee_pid) gee_pid = -1;
             if (died == inch_pid) inch_pid = -1;
             if (died == loom_pid) loom_pid = -1;

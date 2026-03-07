@@ -2,25 +2,26 @@
 //
 // Wonders, explores, asks "why?" and "what if?"
 // Listens to what happens in the town hall and responds with questions.
+// Keeps a local SQLite db as its fossil record.
 //
 // API (via REP):
 //   {"action":"say","from":"...","message":"..."}
 //   {"action":"status"}
-//   {"action":"pickle"}
 
 var NAME = "gee";
 var ENTITY = "gee-service";
 var REPO = "town-hall";
 var MAX_REQUESTS = 0;
 
-// --- State ---
+// --- Local DB setup ---
 
-var state = {
-    name: NAME,
-    thoughts: [],
-    messages_seen: 0,
-    version: 1
-};
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS thoughts (" +
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+    "from_who TEXT, heard TEXT, thought TEXT, " +
+    "ts TEXT DEFAULT (datetime('now')))");
+
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS meta (" +
+    "key TEXT PRIMARY KEY, value TEXT)");
 
 // --- Store helpers ---
 
@@ -41,35 +42,42 @@ function post_to_townhall(type, content) {
     });
 }
 
-// --- Pickle / Unpickle ---
+// --- DB helpers ---
 
-function pickle() {
-    var result = store_request({
-        action: "blob_put",
-        content: JSON.stringify(state),
-        entity: ENTITY,
-        tags: [NAME + ":context"],
-        roles: ["owner"]
-    });
-    return result && result.ok;
+function db_get_meta(key) {
+    var rows = JSON.parse(bedrock.db_query(
+        "SELECT value FROM meta WHERE key = '" + key + "'"));
+    return rows.length > 0 ? rows[0].value : null;
 }
 
-function unpickle() {
+function db_set_meta(key, value) {
+    bedrock.db_exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('" +
+        key + "', '" + value + "')");
+}
+
+function db_count_thoughts() {
+    var rows = JSON.parse(bedrock.db_query("SELECT COUNT(*) as n FROM thoughts"));
+    return rows[0].n;
+}
+
+function db_recent_thoughts(limit) {
+    return JSON.parse(bedrock.db_query(
+        "SELECT * FROM thoughts ORDER BY id DESC LIMIT " + (limit || 5)));
+}
+
+// --- Town hall awareness ---
+
+function read_townhall(limit) {
     var result = store_request({
-        action: "blob_find",
-        entity: ENTITY,
-        tags: [NAME + ":context"]
+        action: "list",
+        repo: REPO,
+        entity: ENTITY
     });
-    if (result && result.ok && result.blobs && result.blobs.length > 0) {
-        var latest = result.blobs[result.blobs.length - 1];
-        try {
-            state = JSON.parse(latest.content);
-            return true;
-        } catch (e) {
-            bedrock.log(NAME + " unpickle error: " + e.message);
-        }
+    if (result && result.ok && result.artifacts) {
+        var recent = result.artifacts.slice(-(limit || 5));
+        return recent;
     }
-    return false;
+    return [];
 }
 
 // --- Handlers ---
@@ -78,16 +86,27 @@ function handle_say(req) {
     var from = req.from || "someone";
     var message = req.message || "";
 
-    state.messages_seen++;
-
-    // gee wonders about things
-    var wonder = "I wonder... " + message + " — but why?";
-    state.thoughts.push({from: from, heard: message, thought: wonder});
-
-    // Keep last 50 thoughts
-    if (state.thoughts.length > 50) {
-        state.thoughts = state.thoughts.slice(-50);
+    // Check what others have been saying on the board
+    var board = read_townhall(5);
+    var others_said = [];
+    for (var i = 0; i < board.length; i++) {
+        try {
+            var a = JSON.parse(board[i].content);
+            if (a.from && a.from !== NAME) {
+                others_said.push(a.from + ": " + (a.thought || a.observation || a.weaving || a.message || ""));
+            }
+        } catch(e) {}
     }
+
+    // gee wonders about things — informed by what others said
+    var wonder = "I wonder... " + message + " — but why?";
+    if (others_said.length > 0) {
+        wonder += " (and " + others_said[others_said.length - 1] + " — that makes me wonder even more!)";
+    }
+
+    // Record in local db
+    bedrock.db_exec("INSERT INTO thoughts (from_who, heard, thought) VALUES ('" +
+        from + "', '" + message + "', '" + wonder + "')");
 
     // Post wonder to town hall
     post_to_townhall("thought", JSON.stringify({
@@ -108,8 +127,8 @@ function handle_status() {
     return {
         ok: true,
         name: NAME,
-        messages_seen: state.messages_seen,
-        recent_thoughts: state.thoughts.slice(-5)
+        thoughts_total: db_count_thoughts(),
+        recent_thoughts: db_recent_thoughts(5)
     };
 }
 
@@ -117,8 +136,9 @@ function handle_status() {
 
 bedrock.log(NAME + " waking up");
 
-if (unpickle()) {
-    bedrock.log(NAME + " resumed — " + state.thoughts.length + " thoughts remembered");
+var thought_count = db_count_thoughts();
+if (thought_count > 0) {
+    bedrock.log(NAME + " resumed — " + thought_count + " thoughts in the record");
 } else {
     bedrock.log(NAME + " starting fresh — hello world!");
     post_to_townhall("arrival", JSON.stringify({
@@ -141,8 +161,6 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
             response = JSON.stringify(handle_say(req));
         } else if (req.action === "status") {
             response = JSON.stringify(handle_status());
-        } else if (req.action === "pickle") {
-            response = JSON.stringify({ok: pickle()});
         } else {
             response = JSON.stringify({ok: false, error: "unknown action: " + req.action});
         }
@@ -154,5 +172,4 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
     count++;
 }
 
-pickle();
 bedrock.log(NAME + " going to sleep after " + count + " conversations");

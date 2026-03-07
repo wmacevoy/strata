@@ -2,25 +2,27 @@
 //
 // Methodical, detail-oriented, careful. Moves step by step.
 // Listens to what happens and responds with careful observations.
+// Keeps a local SQLite db as its fossil record.
 //
 // API (via REP):
 //   {"action":"say","from":"...","message":"..."}
 //   {"action":"status"}
-//   {"action":"pickle"}
 
 var NAME = "inch";
 var ENTITY = "inch-service";
 var REPO = "town-hall";
 var MAX_REQUESTS = 0;
 
-// --- State ---
+// --- Local DB setup ---
 
-var state = {
-    name: NAME,
-    observations: [],
-    messages_seen: 0,
-    version: 1
-};
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS observations (" +
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+    "from_who TEXT, heard TEXT, observation TEXT, " +
+    "word_count INTEGER, " +
+    "ts TEXT DEFAULT (datetime('now')))");
+
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS meta (" +
+    "key TEXT PRIMARY KEY, value TEXT)");
 
 // --- Store helpers ---
 
@@ -41,35 +43,37 @@ function post_to_townhall(type, content) {
     });
 }
 
-// --- Pickle / Unpickle ---
+// --- DB helpers ---
 
-function pickle() {
-    var result = store_request({
-        action: "blob_put",
-        content: JSON.stringify(state),
-        entity: ENTITY,
-        tags: [NAME + ":context"],
-        roles: ["owner"]
-    });
-    return result && result.ok;
+function db_count_observations() {
+    var rows = JSON.parse(bedrock.db_query("SELECT COUNT(*) as n FROM observations"));
+    return rows[0].n;
 }
 
-function unpickle() {
+function db_recent_observations(limit) {
+    return JSON.parse(bedrock.db_query(
+        "SELECT * FROM observations ORDER BY id DESC LIMIT " + (limit || 5)));
+}
+
+function db_total_words() {
+    var rows = JSON.parse(bedrock.db_query(
+        "SELECT COALESCE(SUM(word_count), 0) as total FROM observations"));
+    return rows[0].total;
+}
+
+// --- Town hall awareness ---
+
+function read_townhall(limit) {
     var result = store_request({
-        action: "blob_find",
-        entity: ENTITY,
-        tags: [NAME + ":context"]
+        action: "list",
+        repo: REPO,
+        entity: ENTITY
     });
-    if (result && result.ok && result.blobs && result.blobs.length > 0) {
-        var latest = result.blobs[result.blobs.length - 1];
-        try {
-            state = JSON.parse(latest.content);
-            return true;
-        } catch (e) {
-            bedrock.log(NAME + " unpickle error: " + e.message);
-        }
+    if (result && result.ok && result.artifacts) {
+        var recent = result.artifacts.slice(-(limit || 5));
+        return recent;
     }
-    return false;
+    return [];
 }
 
 // --- Handlers ---
@@ -78,19 +82,29 @@ function handle_say(req) {
     var from = req.from || "someone";
     var message = req.message || "";
 
-    state.messages_seen++;
+    // Check what others have been saying on the board
+    var board = read_townhall(5);
+    var others_said = [];
+    for (var i = 0; i < board.length; i++) {
+        try {
+            var a = JSON.parse(board[i].content);
+            if (a.from && a.from !== NAME) {
+                others_said.push(a.from + ": " + (a.thought || a.observation || a.weaving || a.message || ""));
+            }
+        } catch(e) {}
+    }
 
-    // inch observes precisely
+    // inch observes precisely — informed by what others noted
     var words = message.split(" ");
     var observation = "Noted: " + words.length + " words from " + from + ". ";
     observation += "Let me consider this carefully: \"" + message + "\"";
-
-    state.observations.push({from: from, heard: message, noted: observation});
-
-    // Keep last 50
-    if (state.observations.length > 50) {
-        state.observations = state.observations.slice(-50);
+    if (others_said.length > 0) {
+        observation += " I also note that " + others_said[others_said.length - 1];
     }
+
+    // Record in local db
+    bedrock.db_exec("INSERT INTO observations (from_who, heard, observation, word_count) VALUES ('" +
+        from + "', '" + message + "', '" + observation + "', " + words.length + ")");
 
     // Post to town hall
     post_to_townhall("observation", JSON.stringify({
@@ -110,8 +124,9 @@ function handle_status() {
     return {
         ok: true,
         name: NAME,
-        messages_seen: state.messages_seen,
-        recent_observations: state.observations.slice(-5)
+        observations_total: db_count_observations(),
+        total_words_measured: db_total_words(),
+        recent_observations: db_recent_observations(5)
     };
 }
 
@@ -119,8 +134,10 @@ function handle_status() {
 
 bedrock.log(NAME + " waking up");
 
-if (unpickle()) {
-    bedrock.log(NAME + " resumed — " + state.observations.length + " observations on file");
+var obs_count = db_count_observations();
+if (obs_count > 0) {
+    bedrock.log(NAME + " resumed — " + obs_count + " observations on file, " +
+                db_total_words() + " words measured");
 } else {
     bedrock.log(NAME + " starting fresh — ready to observe");
     post_to_townhall("arrival", JSON.stringify({
@@ -143,8 +160,6 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
             response = JSON.stringify(handle_say(req));
         } else if (req.action === "status") {
             response = JSON.stringify(handle_status());
-        } else if (req.action === "pickle") {
-            response = JSON.stringify({ok: pickle()});
         } else {
             response = JSON.stringify({ok: false, error: "unknown action: " + req.action});
         }
@@ -156,5 +171,4 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
     count++;
 }
 
-pickle();
 bedrock.log(NAME + " going to sleep after " + count + " conversations");

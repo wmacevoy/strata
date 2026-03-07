@@ -23,6 +23,35 @@ static volatile int running = 1;
 static void sigint_handler(int sig) { (void)sig; running = 0; }
 
 /* ------------------------------------------------------------------ */
+/*  Agent registry (for talk command)                                   */
+/* ------------------------------------------------------------------ */
+
+#define MAX_AGENTS 16
+
+typedef struct {
+    char name[64];
+    char endpoint[256];
+} agent_entry;
+
+static agent_entry agents[MAX_AGENTS];
+static int num_agents = 0;
+
+static void agent_register(const char *name, const char *endpoint) {
+    if (num_agents >= MAX_AGENTS) return;
+    strncpy(agents[num_agents].name, name, sizeof(agents[0].name) - 1);
+    strncpy(agents[num_agents].endpoint, endpoint, sizeof(agents[0].endpoint) - 1);
+    num_agents++;
+}
+
+static const char *agent_lookup(const char *name) {
+    for (int i = 0; i < num_agents; i++) {
+        if (strcmp(agents[i].name, name) == 0)
+            return agents[i].endpoint;
+    }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /*  ZMQ helpers                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -82,6 +111,7 @@ static void *event_listener(void *arg) {
 static void cmd_help(void) {
     printf(
         "Commands:\n"
+        "  talk <agent> <message>       — talk to an agent directly\n"
         "  msg post <repo> <type> <content> <roles_csv>\n"
         "  msg list <repo> [type]\n"
         "  msg get <artifact_id>\n"
@@ -123,7 +153,7 @@ static int build_json_array(char *buf, int cap, int pos,
     return pos;
 }
 
-static void handle_line(void *req_sock, const char *entity, const char *line) {
+static void handle_line(void *zmq_ctx, void *req_sock, const char *entity, const char *line) {
     /* Tokenize the line */
     char buf[4096];
     strncpy(buf, line, sizeof(buf) - 1);
@@ -165,6 +195,50 @@ static void handle_line(void *req_sock, const char *entity, const char *line) {
     }
     if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
         running = 0;
+        return;
+    }
+
+    /* talk <agent> <message...> */
+    if (strcmp(cmd, "talk") == 0) {
+        if (ntok < 2) { printf("usage: talk <agent> <message>\n"); return; }
+        const char *agent_name = tokens[0];
+        const char *ep = agent_lookup(agent_name);
+        if (!ep) {
+            /* Try treating it as a raw endpoint */
+            if (strncmp(agent_name, "tcp://", 6) == 0 || strncmp(agent_name, "ipc://", 6) == 0)
+                ep = agent_name;
+            else {
+                printf("unknown agent: %s (register with --agent %s=<endpoint>)\n", agent_name, agent_name);
+                return;
+            }
+        }
+        /* Reassemble message from remaining tokens */
+        char message[4096] = {0};
+        int mpos = 0;
+        for (int i = 1; i < ntok && mpos < (int)sizeof(message) - 1; i++) {
+            if (i > 1) message[mpos++] = ' ';
+            mpos += snprintf(message + mpos, sizeof(message) - mpos, "%s", tokens[i]);
+        }
+        /* Create temporary REQ socket to agent */
+        void *agent_sock = zmq_socket(zmq_ctx, ZMQ_REQ);
+        int talk_timeout = 5000;
+        zmq_setsockopt(agent_sock, ZMQ_RCVTIMEO, &talk_timeout, sizeof(talk_timeout));
+        zmq_connect(agent_sock, ep);
+
+        char talk_req[8192];
+        char esc_message[4096];
+        json_escape(message, (int)strlen(message), esc_message, sizeof(esc_message));
+        snprintf(talk_req, sizeof(talk_req),
+            "{\"action\":\"say\",\"from\":\"%s\",\"message\":\"%s\"}",
+            entity, esc_message);
+
+        char talk_resp[16384];
+        if (zmq_do_request(agent_sock, talk_req, talk_resp, sizeof(talk_resp)) < 0) {
+            printf("error: %s did not respond\n", agent_name);
+        } else {
+            printf("%s: %s\n", agent_name, talk_resp);
+        }
+        zmq_close(agent_sock);
         return;
     }
 
@@ -307,11 +381,13 @@ static void handle_line(void *req_sock, const char *entity, const char *line) {
 static void usage(void) {
     fprintf(stderr,
         "usage: strata-human --endpoint <store_url> --entity <id> [--sub <pub_url>] [--topic <filter>]\n"
+        "                    [--agent name=endpoint ...]\n"
         "\n"
         "  --endpoint  Store service ZMQ endpoint (REQ/REP)\n"
         "  --entity    Your identity in the village\n"
         "  --sub       PUB endpoint to subscribe for events (optional)\n"
         "  --topic     Event topic filter (default: change/)\n"
+        "  --agent     Register agent for talk command (e.g. --agent gee=tcp://127.0.0.1:5570)\n"
     );
 }
 
@@ -326,17 +402,26 @@ int main(int argc, char **argv) {
         {"entity",   required_argument, NULL, 'e'},
         {"sub",      required_argument, NULL, 's'},
         {"topic",    required_argument, NULL, 'o'},
+        {"agent",    required_argument, NULL, 'a'},
         {"help",     no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "E:e:s:o:h", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "E:e:s:o:a:h", long_opts, NULL)) != -1) {
         switch (c) {
             case 'E': endpoint = optarg; break;
             case 'e': entity = optarg; break;
             case 's': sub_endpoint = optarg; break;
             case 'o': topic = optarg; break;
+            case 'a': {
+                /* Parse name=endpoint */
+                char *eq = strchr(optarg, '=');
+                if (!eq) { fprintf(stderr, "--agent format: name=endpoint\n"); return 1; }
+                *eq = '\0';
+                agent_register(optarg, eq + 1);
+                break;
+            }
             case 'h': usage(); return 0;
             default: usage(); return 1;
         }
@@ -365,6 +450,8 @@ int main(int argc, char **argv) {
     printf("store: %s\n", endpoint);
     if (sub_endpoint)
         printf("events: %s (topic: %s)\n", sub_endpoint, topic);
+    for (int i = 0; i < num_agents; i++)
+        printf("agent: %s @ %s\n", agents[i].name, agents[i].endpoint);
     printf("type 'help' for commands, 'quit' to exit\n\n");
 
     /* REPL */
@@ -382,7 +469,7 @@ int main(int argc, char **argv) {
 
         if (len == 0) continue;
 
-        handle_line(req, entity, line);
+        handle_line(zmq_ctx, req, entity, line);
     }
 
     printf("\nleaving village\n");

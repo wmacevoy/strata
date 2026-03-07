@@ -17,8 +17,12 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
 
 STORE_EP="tcp://127.0.0.1:5560"
+SMITH_EP="tcp://127.0.0.1:5590"
 
-# Ports used by dens
+# Agent endpoints
+GEE_REP="tcp://127.0.0.1:5570"
+INCH_REP="tcp://127.0.0.1:5571"
+LOOM_REP="tcp://127.0.0.1:5572"
 GEE_PUB="tcp://127.0.0.1:5580"
 INCH_PUB="tcp://127.0.0.1:5581"
 LOOM_PUB="tcp://127.0.0.1:5582"
@@ -40,7 +44,7 @@ stop_village() {
         rm -f "$PID_FILE"
     fi
     # Clean up any orphan processes on our ports
-    for port in 5560 5570 5571 5572 5580 5581 5582; do
+    for port in 5560 5570 5571 5572 5580 5581 5582 5590; do
         lsof -ti :$port 2>/dev/null | xargs kill 2>/dev/null || true
     done
     rm -f "$DB" "${DB}-wal" "${DB}-shm"
@@ -64,7 +68,7 @@ start_village() {
     echo "starting village..."
     cd "$PROJECT_DIR"
     "$BUILD_DIR/warren_village" &
-    sleep 1
+    sleep 3
 
     if [ ! -f "$PID_FILE" ]; then
         echo "ERROR: village failed to start"
@@ -80,17 +84,18 @@ run_human() {
     echo "  store: $STORE_EP"
     echo "  events from: gee ($GEE_PUB), inch ($INCH_PUB), loom ($LOOM_PUB)"
     echo ""
-    echo "  Talk to agents:  (in another terminal)"
-    echo "    echo '{\"action\":\"say\",\"from\":\"warren\",\"message\":\"hello\"}' | ..."
-    echo ""
-    echo "  Or use the REPL commands below (type 'help')"
+    echo "  Talk to agents:  talk gee hello!"
     echo ""
 
     "$BUILD_DIR/strata-human" \
         --endpoint "$STORE_EP" \
         --entity warren \
         --sub "$GEE_PUB" \
-        --topic "town-hall/"
+        --topic "town-hall/" \
+        --agent "gee=$GEE_REP" \
+        --agent "inch=$INCH_REP" \
+        --agent "loom=$LOOM_REP" \
+        --agent "code-smith=$SMITH_EP"
 }
 
 # --- Main ---

@@ -137,6 +137,21 @@ add_executable(test_collaboration test/test_collaboration.c $<TARGET_OBJECTS:sto
 target_link_libraries(test_collaboration strata)
 add_test(NAME test_collaboration COMMAND test_collaboration WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Code-smith vocation service
+add_library(code_smith_lib OBJECT src/code_smith.c)
+target_include_directories(code_smith_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZMQ_INCLUDE_DIR}
+)
+target_compile_definitions(code_smith_lib PRIVATE CODE_SMITH_NO_MAIN)
+
+add_executable(code_smith src/code_smith.c)
+target_include_directories(code_smith PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(code_smith ${ZMQ_LIBRARY})
+
 # Village daemon
 add_executable(village_daemon src/village.c)
 target_include_directories(village_daemon PRIVATE
@@ -163,7 +178,7 @@ target_link_libraries(strata_human_cli strata)
 set_target_properties(strata_human_cli PROPERTIES OUTPUT_NAME "strata-human")
 
 # Warren's Village
-add_executable(warren_village src/warren_village.c $<TARGET_OBJECTS:store_service_lib>)
+add_executable(warren_village src/warren_village.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib>)
 target_link_libraries(warren_village strata)
 
 # Examples

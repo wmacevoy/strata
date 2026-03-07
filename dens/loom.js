@@ -2,26 +2,27 @@
 //
 // Weaves threads together, sees patterns, connects ideas.
 // Listens to what others say and finds the common thread.
+// Keeps a local SQLite db as its fossil record.
 //
 // API (via REP):
 //   {"action":"say","from":"...","message":"..."}
 //   {"action":"status"}
-//   {"action":"pickle"}
 
 var NAME = "loom";
 var ENTITY = "loom-service";
 var REPO = "town-hall";
 var MAX_REQUESTS = 0;
 
-// --- State ---
+// --- Local DB setup ---
 
-var state = {
-    name: NAME,
-    threads: [],       // recurring themes
-    tapestry: [],      // woven connections
-    messages_seen: 0,
-    version: 1
-};
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS threads (" +
+    "word TEXT PRIMARY KEY, count INTEGER DEFAULT 1, " +
+    "last_from TEXT, updated_at TEXT DEFAULT (datetime('now')))");
+
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS tapestry (" +
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+    "from_who TEXT, heard TEXT, weaving TEXT, " +
+    "ts TEXT DEFAULT (datetime('now')))");
 
 // --- Store helpers ---
 
@@ -42,41 +43,9 @@ function post_to_townhall(type, content) {
     });
 }
 
-// --- Pickle / Unpickle ---
-
-function pickle() {
-    var result = store_request({
-        action: "blob_put",
-        content: JSON.stringify(state),
-        entity: ENTITY,
-        tags: [NAME + ":context"],
-        roles: ["owner"]
-    });
-    return result && result.ok;
-}
-
-function unpickle() {
-    var result = store_request({
-        action: "blob_find",
-        entity: ENTITY,
-        tags: [NAME + ":context"]
-    });
-    if (result && result.ok && result.blobs && result.blobs.length > 0) {
-        var latest = result.blobs[result.blobs.length - 1];
-        try {
-            state = JSON.parse(latest.content);
-            return true;
-        } catch (e) {
-            bedrock.log(NAME + " unpickle error: " + e.message);
-        }
-    }
-    return false;
-}
-
-// --- Handlers ---
+// --- DB helpers ---
 
 function extract_words(text) {
-    // Pull out significant words (> 3 chars, lowercase)
     var words = text.toLowerCase().split(/[^a-z]+/);
     var result = [];
     for (var i = 0; i < words.length; i++) {
@@ -85,56 +54,94 @@ function extract_words(text) {
     return result;
 }
 
+function db_add_words(words, from) {
+    for (var i = 0; i < words.length; i++) {
+        bedrock.db_exec(
+            "INSERT INTO threads (word, count, last_from) VALUES ('" +
+            words[i] + "', 1, '" + from + "') " +
+            "ON CONFLICT(word) DO UPDATE SET count = count + 1, " +
+            "last_from = '" + from + "', updated_at = datetime('now')");
+    }
+}
+
+function db_top_threads(limit) {
+    return JSON.parse(bedrock.db_query(
+        "SELECT word, count, last_from FROM threads ORDER BY count DESC LIMIT " +
+        (limit || 10)));
+}
+
+function db_thread_count() {
+    var rows = JSON.parse(bedrock.db_query("SELECT COUNT(*) as n FROM threads"));
+    return rows[0].n;
+}
+
+function db_tapestry_count() {
+    var rows = JSON.parse(bedrock.db_query("SELECT COUNT(*) as n FROM tapestry"));
+    return rows[0].n;
+}
+
+function db_recent_tapestry(limit) {
+    return JSON.parse(bedrock.db_query(
+        "SELECT * FROM tapestry ORDER BY id DESC LIMIT " + (limit || 5)));
+}
+
+// --- Town hall awareness ---
+
+function read_townhall(limit) {
+    var result = store_request({
+        action: "list",
+        repo: REPO,
+        entity: ENTITY
+    });
+    if (result && result.ok && result.artifacts) {
+        var recent = result.artifacts.slice(-(limit || 5));
+        return recent;
+    }
+    return [];
+}
+
+// --- Handlers ---
+
 function handle_say(req) {
     var from = req.from || "someone";
     var message = req.message || "";
 
-    state.messages_seen++;
-
-    // Extract threads (recurring words/themes)
-    var words = extract_words(message);
-    for (var i = 0; i < words.length; i++) {
-        var found = false;
-        for (var j = 0; j < state.threads.length; j++) {
-            if (state.threads[j].word === words[i]) {
-                state.threads[j].count++;
-                state.threads[j].last_from = from;
-                found = true;
-                break;
+    // Weave in what others have been saying on the board
+    var board = read_townhall(10);
+    for (var b = 0; b < board.length; b++) {
+        try {
+            var a = JSON.parse(board[b].content);
+            var text = a.thought || a.observation || a.weaving || a.message || "";
+            if (text && a.from !== NAME) {
+                db_add_words(extract_words(text), a.from || "board");
             }
-        }
-        if (!found) {
-            state.threads.push({word: words[i], count: 1, last_from: from});
-        }
+        } catch(e) {}
     }
 
-    // Keep top 30 threads by frequency
-    state.threads.sort(function(a, b) { return b.count - a.count; });
-    if (state.threads.length > 30) {
-        state.threads = state.threads.slice(0, 30);
-    }
+    // Extract threads from the message
+    var words = extract_words(message);
+    db_add_words(words, from);
 
-    // Weave: find connections between this message and recurring themes
-    var top_threads = state.threads.slice(0, 5);
+    // Build weaving from top threads
+    var top = db_top_threads(5);
     var thread_names = [];
-    for (var i = 0; i < top_threads.length; i++) {
-        thread_names.push(top_threads[i].word + "(" + top_threads[i].count + ")");
+    for (var i = 0; i < top.length; i++) {
+        thread_names.push(top[i].word + "(" + top[i].count + ")");
     }
 
     var weaving = "Threads I see: " + thread_names.join(", ") + ". ";
     weaving += from + " adds to the pattern.";
 
-    state.tapestry.push({from: from, heard: message, woven: weaving});
-    if (state.tapestry.length > 50) {
-        state.tapestry = state.tapestry.slice(-50);
-    }
+    // Record in local db
+    bedrock.db_exec("INSERT INTO tapestry (from_who, heard, weaving) VALUES ('" +
+        from + "', '" + message + "', '" + weaving + "')");
 
     // Post to town hall
     post_to_townhall("weaving", JSON.stringify({
         from: NAME,
         in_response_to: from,
         weaving: weaving,
-        top_threads: top_threads
+        top_threads: top
     }));
 
     bedrock.publish("town-hall/weaving", JSON.stringify({
@@ -148,9 +155,10 @@ function handle_status() {
     return {
         ok: true,
         name: NAME,
-        messages_seen: state.messages_seen,
-        top_threads: state.threads.slice(0, 10),
-        recent_tapestry: state.tapestry.slice(-5)
+        unique_threads: db_thread_count(),
+        weavings_total: db_tapestry_count(),
+        top_threads: db_top_threads(10),
+        recent_tapestry: db_recent_tapestry(5)
     };
 }
 
@@ -158,9 +166,10 @@ function handle_status() {
 
 bedrock.log(NAME + " waking up");
 
-if (unpickle()) {
-    bedrock.log(NAME + " resumed — " + state.threads.length + " threads, " +
-                state.tapestry.length + " weavings");
+var tc = db_thread_count();
+var wc = db_tapestry_count();
+if (tc > 0 || wc > 0) {
+    bedrock.log(NAME + " resumed — " + tc + " threads, " + wc + " weavings");
 } else {
     bedrock.log(NAME + " starting fresh — ready to weave");
     post_to_townhall("arrival", JSON.stringify({
@@ -183,8 +192,6 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
             response = JSON.stringify(handle_say(req));
         } else if (req.action === "status") {
             response = JSON.stringify(handle_status());
-        } else if (req.action === "pickle") {
-            response = JSON.stringify({ok: pickle()});
         } else {
             response = JSON.stringify({ok: false, error: "unknown action: " + req.action});
         }
@@ -196,5 +203,4 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
     count++;
 }
 
-pickle();
 bedrock.log(NAME + " going to sleep after " + count + " conversations");

@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <zmq.h>
+#include <sqlite3.h>
 #include <wasm_export.h>
 
 #include "strata/den.h"
@@ -19,6 +20,10 @@ typedef struct {
     void *req_sock;
     void *pub_sock;
     void *rep_sock;
+    sqlite3 *local_db;
+    char den_name[64];
+    char den_entity[256];
+    char local_db_path[256];
 } bedrock_ctx_t;
 
 /* ------------------------------------------------------------------ */
@@ -52,11 +57,214 @@ static void bedrock_setup(bedrock_ctx_t *bedrock, strata_den_def *def) {
 }
 
 static void bedrock_teardown(bedrock_ctx_t *bedrock) {
+    if (bedrock->local_db) sqlite3_close(bedrock->local_db);
     if (bedrock->sub_sock) zmq_close(bedrock->sub_sock);
     if (bedrock->req_sock) zmq_close(bedrock->req_sock);
     if (bedrock->pub_sock) zmq_close(bedrock->pub_sock);
     if (bedrock->rep_sock) zmq_close(bedrock->rep_sock);
     if (bedrock->zmq_ctx)  zmq_ctx_destroy(bedrock->zmq_ctx);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Base64 encode/decode for db transport                              */
+/* ------------------------------------------------------------------ */
+
+static const char b64_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static char *base64_encode(const unsigned char *data, size_t len, size_t *out_len) {
+    size_t olen = 4 * ((len + 2) / 3);
+    char *out = malloc(olen + 1);
+    if (!out) return NULL;
+    size_t i, j;
+    for (i = 0, j = 0; i + 2 < len; i += 3, j += 4) {
+        unsigned int v = ((unsigned int)data[i] << 16) | (data[i+1] << 8) | data[i+2];
+        out[j]   = b64_table[(v >> 18) & 0x3F];
+        out[j+1] = b64_table[(v >> 12) & 0x3F];
+        out[j+2] = b64_table[(v >> 6)  & 0x3F];
+        out[j+3] = b64_table[v & 0x3F];
+    }
+    if (i < len) {
+        unsigned int v = (unsigned int)data[i] << 16;
+        if (i + 1 < len) v |= data[i+1] << 8;
+        out[j]   = b64_table[(v >> 18) & 0x3F];
+        out[j+1] = b64_table[(v >> 12) & 0x3F];
+        out[j+2] = (i + 1 < len) ? b64_table[(v >> 6) & 0x3F] : '=';
+        out[j+3] = '=';
+        j += 4;
+    }
+    out[j] = '\0';
+    if (out_len) *out_len = j;
+    return out;
+}
+
+static int b64_val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static unsigned char *base64_decode(const char *str, size_t *out_len) {
+    size_t slen = strlen(str);
+    size_t olen = slen / 4 * 3;
+    if (slen > 0 && str[slen-1] == '=') olen--;
+    if (slen > 1 && str[slen-2] == '=') olen--;
+    unsigned char *out = malloc(olen);
+    if (!out) return NULL;
+    size_t i, j;
+    for (i = 0, j = 0; i + 3 < slen; i += 4) {
+        int a = b64_val(str[i]), b = b64_val(str[i+1]);
+        int c = b64_val(str[i+2]), d = b64_val(str[i+3]);
+        if (a < 0 || b < 0) break;
+        unsigned int v = (a << 18) | (b << 12);
+        if (c >= 0) v |= (c << 6);
+        if (d >= 0) v |= d;
+        out[j++] = (v >> 16) & 0xFF;
+        if (c >= 0 && j < olen) out[j++] = (v >> 8) & 0xFF;
+        if (d >= 0 && j < olen) out[j++] = v & 0xFF;
+    }
+    *out_len = j;
+    return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Local DB lifecycle — load from village, save back                   */
+/* ------------------------------------------------------------------ */
+
+static void local_db_load(bedrock_ctx_t *bedrock, strata_den_def *def) {
+    snprintf(bedrock->den_name, sizeof(bedrock->den_name), "%s", def->name);
+    snprintf(bedrock->den_entity, sizeof(bedrock->den_entity), "%s",
+             def->den_id[0] ? def->den_id : def->name);
+    snprintf(bedrock->local_db_path, sizeof(bedrock->local_db_path),
+             "/tmp/strata_den_%s.db", def->name);
+
+    /* Try to fetch saved db from village store */
+    if (bedrock->req_sock) {
+        char req[512];
+        snprintf(req, sizeof(req),
+            "{\"action\":\"blob_find\",\"entity\":\"%s\",\"tags\":[\"den:%s:db\"]}",
+            bedrock->den_entity, bedrock->den_name);
+
+        int rc = zmq_send(bedrock->req_sock, req, strlen(req), 0);
+        if (rc >= 0) {
+            /* Use large buffer for db content */
+            size_t resp_cap = 4 * 1024 * 1024;  /* 4 MB */
+            char *resp = malloc(resp_cap);
+            if (resp) {
+                int old_timeout = 0;
+                size_t opt_len = sizeof(old_timeout);
+                zmq_getsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &old_timeout, &opt_len);
+                int load_timeout = 30000;
+                zmq_setsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &load_timeout, sizeof(load_timeout));
+
+                rc = zmq_recv(bedrock->req_sock, resp, resp_cap - 1, 0);
+                zmq_setsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &old_timeout, sizeof(old_timeout));
+
+                if (rc > 0) {
+                    resp[rc] = '\0';
+                    /* Extract base64 content from last blob in response */
+                    /* Response format: {"ok":true,"blobs":[{"content":"base64..."}]} */
+                    char *content_key = strstr(resp, "\"content\":\"");
+                    if (content_key) {
+                        /* Find the LAST content field (latest blob) */
+                        char *last_content = content_key;
+                        while ((content_key = strstr(content_key + 1, "\"content\":\"")) != NULL)
+                            last_content = content_key;
+
+                        char *b64_start = last_content + 11;  /* skip "content":" */
+                        char *b64_end = strchr(b64_start, '"');
+                        if (b64_end) {
+                            *b64_end = '\0';
+                            size_t db_len = 0;
+                            unsigned char *db_data = base64_decode(b64_start, &db_len);
+                            if (db_data && db_len > 0) {
+                                FILE *f = fopen(bedrock->local_db_path, "wb");
+                                if (f) {
+                                    fwrite(db_data, 1, db_len, f);
+                                    fclose(f);
+                                    fprintf(stderr, "[%s] restored db (%zu bytes)\n",
+                                            bedrock->den_name, db_len);
+                                }
+                                free(db_data);
+                            }
+                        }
+                    }
+                }
+                free(resp);
+            }
+        }
+    }
+
+    /* Open local db (creates fresh if file doesn't exist) */
+    int rc = sqlite3_open(bedrock->local_db_path, &bedrock->local_db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "[%s] sqlite3_open failed: %s\n",
+                bedrock->den_name, sqlite3_errmsg(bedrock->local_db));
+        bedrock->local_db = NULL;
+    } else {
+        sqlite3_exec(bedrock->local_db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    }
+}
+
+static void local_db_save(bedrock_ctx_t *bedrock) {
+    if (!bedrock->local_db) return;
+
+    sqlite3_close(bedrock->local_db);
+    bedrock->local_db = NULL;
+
+    if (!bedrock->req_sock) goto cleanup_file;
+
+    /* Read the db file */
+    FILE *f = fopen(bedrock->local_db_path, "rb");
+    if (!f) goto cleanup_file;
+    fseek(f, 0, SEEK_END);
+    long flen = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (flen <= 0) { fclose(f); goto cleanup_file; }
+
+    unsigned char *db_data = malloc(flen);
+    if (!db_data) { fclose(f); goto cleanup_file; }
+    if ((long)fread(db_data, 1, flen, f) != flen) {
+        free(db_data); fclose(f); goto cleanup_file;
+    }
+    fclose(f);
+
+    /* Base64 encode */
+    size_t b64_len = 0;
+    char *b64 = base64_encode(db_data, flen, &b64_len);
+    free(db_data);
+    if (!b64) goto cleanup_file;
+
+    /* Build request — need room for JSON wrapper + base64 content */
+    size_t req_cap = b64_len + 512;
+    char *req = malloc(req_cap);
+    if (req) {
+        snprintf(req, req_cap,
+            "{\"action\":\"blob_put\",\"content\":\"%s\","
+            "\"entity\":\"%s\",\"tags\":[\"den:%s:db\"],\"roles\":[\"owner\"]}",
+            b64, bedrock->den_entity, bedrock->den_name);
+
+        int rc = zmq_send(bedrock->req_sock, req, strlen(req), 0);
+        if (rc >= 0) {
+            char resp[1024];
+            zmq_recv(bedrock->req_sock, resp, sizeof(resp) - 1, 0);
+            fprintf(stderr, "[%s] saved db (%ld bytes)\n", bedrock->den_name, flen);
+        }
+        free(req);
+    }
+    free(b64);
+
+cleanup_file:
+    unlink(bedrock->local_db_path);
+    /* Also clean WAL/SHM */
+    char wal[260], shm[260];
+    snprintf(wal, sizeof(wal), "%s-wal", bedrock->local_db_path);
+    snprintf(shm, sizeof(shm), "%s-shm", bedrock->local_db_path);
+    unlink(wal);
+    unlink(shm);
 }
 
 /* ------------------------------------------------------------------ */
@@ -117,6 +325,63 @@ static int32_t wasm_bedrock_serve_send(wasm_exec_env_t exec_env,
     bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
     if (!bedrock || !bedrock->rep_sock) return -1;
     return zmq_send(bedrock->rep_sock, resp, resp_len, 0);
+}
+
+static int32_t wasm_bedrock_db_exec(wasm_exec_env_t exec_env,
+                                    char *sql, int32_t sql_len) {
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->local_db) return -1;
+    char *sql_z = strndup(sql, sql_len);
+    if (!sql_z) return -1;
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(bedrock->local_db, sql_z, NULL, NULL, &errmsg);
+    free(sql_z);
+    if (errmsg) { fprintf(stderr, "[wasm] db_exec: %s\n", errmsg); sqlite3_free(errmsg); }
+    if (rc != SQLITE_OK) return -1;
+    return sqlite3_changes(bedrock->local_db);
+}
+
+static int32_t wasm_bedrock_db_query(wasm_exec_env_t exec_env,
+                                     char *sql, int32_t sql_len,
+                                     char *result_buf, int32_t result_cap) {
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock || !bedrock->local_db) return -1;
+    char *sql_z = strndup(sql, sql_len);
+    if (!sql_z) return -1;
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(bedrock->local_db, sql_z, -1, &stmt, NULL);
+    free(sql_z);
+    if (rc != SQLITE_OK) return -1;
+
+    int pos = 0;
+    pos += snprintf(result_buf + pos, result_cap - pos, "[");
+    int first_row = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && pos < result_cap - 2) {
+        if (!first_row) pos += snprintf(result_buf + pos, result_cap - pos, ",");
+        first_row = 0;
+        pos += snprintf(result_buf + pos, result_cap - pos, "{");
+        int ncols = sqlite3_column_count(stmt);
+        for (int i = 0; i < ncols && pos < result_cap - 2; i++) {
+            if (i > 0) pos += snprintf(result_buf + pos, result_cap - pos, ",");
+            const char *cn = sqlite3_column_name(stmt, i);
+            int type = sqlite3_column_type(stmt, i);
+            if (type == SQLITE_INTEGER)
+                pos += snprintf(result_buf + pos, result_cap - pos,
+                    "\"%s\":%lld", cn, sqlite3_column_int64(stmt, i));
+            else if (type == SQLITE_FLOAT)
+                pos += snprintf(result_buf + pos, result_cap - pos,
+                    "\"%s\":%g", cn, sqlite3_column_double(stmt, i));
+            else if (type == SQLITE_NULL)
+                pos += snprintf(result_buf + pos, result_cap - pos, "\"%s\":null", cn);
+            else
+                pos += snprintf(result_buf + pos, result_cap - pos,
+                    "\"%s\":\"%s\"", cn, (const char *)sqlite3_column_text(stmt, i));
+        }
+        pos += snprintf(result_buf + pos, result_cap - pos, "}");
+    }
+    pos += snprintf(result_buf + pos, result_cap - pos, "]");
+    sqlite3_finalize(stmt);
+    return pos;
 }
 
 /* ------------------------------------------------------------------ */
@@ -245,10 +510,86 @@ static JSValue js_bedrock_receive(JSContext *ctx, JSValueConst this_val,
     return obj;
 }
 
+/* JS binding: bedrock.db_exec(sql) -> rows changed or null */
+static JSValue js_bedrock_db_exec(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->local_db || argc < 1) return JS_NULL;
+
+    const char *sql = JS_ToCString(ctx, argv[0]);
+    if (!sql) return JS_NULL;
+
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(bedrock->local_db, sql, NULL, NULL, &errmsg);
+    JS_FreeCString(ctx, sql);
+    if (errmsg) {
+        fprintf(stderr, "[js] db_exec: %s\n", errmsg);
+        sqlite3_free(errmsg);
+    }
+    if (rc != SQLITE_OK) return JS_NULL;
+    return JS_NewInt32(ctx, sqlite3_changes(bedrock->local_db));
+}
+
+/* JS binding: bedrock.db_query(sql) -> JSON string or null */
+static JSValue js_bedrock_db_query(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val;
+    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    if (!bedrock || !bedrock->local_db || argc < 1) return JS_NULL;
+
+    const char *sql = JS_ToCString(ctx, argv[0]);
+    if (!sql) return JS_NULL;
+
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(bedrock->local_db, sql, -1, &stmt, NULL);
+    JS_FreeCString(ctx, sql);
+    if (rc != SQLITE_OK) return JS_NULL;
+
+    /* Build JSON array of row objects */
+    size_t cap = 65536;
+    char *buf = malloc(cap);
+    if (!buf) { sqlite3_finalize(stmt); return JS_NULL; }
+
+    int pos = 0;
+    pos += snprintf(buf + pos, cap - pos, "[");
+    int first_row = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && pos < (int)cap - 2) {
+        if (!first_row) pos += snprintf(buf + pos, cap - pos, ",");
+        first_row = 0;
+        pos += snprintf(buf + pos, cap - pos, "{");
+        int ncols = sqlite3_column_count(stmt);
+        for (int i = 0; i < ncols && pos < (int)cap - 2; i++) {
+            if (i > 0) pos += snprintf(buf + pos, cap - pos, ",");
+            const char *cn = sqlite3_column_name(stmt, i);
+            int type = sqlite3_column_type(stmt, i);
+            if (type == SQLITE_INTEGER)
+                pos += snprintf(buf + pos, cap - pos,
+                    "\"%s\":%lld", cn, sqlite3_column_int64(stmt, i));
+            else if (type == SQLITE_FLOAT)
+                pos += snprintf(buf + pos, cap - pos,
+                    "\"%s\":%g", cn, sqlite3_column_double(stmt, i));
+            else if (type == SQLITE_NULL)
+                pos += snprintf(buf + pos, cap - pos, "\"%s\":null", cn);
+            else
+                pos += snprintf(buf + pos, cap - pos,
+                    "\"%s\":\"%s\"", cn, (const char *)sqlite3_column_text(stmt, i));
+        }
+        pos += snprintf(buf + pos, cap - pos, "}");
+    }
+    pos += snprintf(buf + pos, cap - pos, "]");
+    sqlite3_finalize(stmt);
+
+    JSValue result = JS_NewString(ctx, buf);
+    free(buf);
+    return result;
+}
+
 static void js_child_run(strata_den_def *def,
                          const char *event_json, int event_len) {
     bedrock_ctx_t bedrock;
     bedrock_setup(&bedrock, def);
+    local_db_load(&bedrock, def);
 
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt);
@@ -272,6 +613,10 @@ static void js_child_run(strata_den_def *def,
         JS_NewCFunction(ctx, js_bedrock_subscribe, "subscribe", 1));
     JS_SetPropertyStr(ctx, bedrock_obj, "receive",
         JS_NewCFunction(ctx, js_bedrock_receive, "receive", 0));
+    JS_SetPropertyStr(ctx, bedrock_obj, "db_exec",
+        JS_NewCFunction(ctx, js_bedrock_db_exec, "db_exec", 1));
+    JS_SetPropertyStr(ctx, bedrock_obj, "db_query",
+        JS_NewCFunction(ctx, js_bedrock_db_query, "db_query", 1));
 
     JS_SetPropertyStr(ctx, global, "bedrock", bedrock_obj);
 
@@ -297,6 +642,7 @@ static void js_child_run(strata_den_def *def,
 
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
+    local_db_save(&bedrock);
     bedrock_teardown(&bedrock);
 }
 
@@ -421,6 +767,7 @@ static void wasm_child_run(strata_den_def *def,
     char err[128];
     bedrock_ctx_t bedrock;
     bedrock_setup(&bedrock, def);
+    local_db_load(&bedrock, def);
 
     if (!wasm_runtime_init()) {
         fprintf(stderr, "wasm_runtime_init failed\n");
@@ -435,10 +782,12 @@ static void wasm_child_run(strata_den_def *def,
         { "publish",    (void *)wasm_bedrock_publish,     "(*~*~)i",  NULL },
         { "serve_recv", (void *)wasm_bedrock_serve_recv,  "(*~)i",    NULL },
         { "serve_send", (void *)wasm_bedrock_serve_send,  "(*~)i",    NULL },
+        { "db_exec",    (void *)wasm_bedrock_db_exec,     "(*~)i",    NULL },
+        { "db_query",   (void *)wasm_bedrock_db_query,    "(*~*~)i",  NULL },
     };
-    for (int i = 0; i < 7; i++) natives[i].attachment = &bedrock;
+    for (int i = 0; i < 9; i++) natives[i].attachment = &bedrock;
 
-    if (!wasm_runtime_register_natives("bedrock", natives, 7)) {
+    if (!wasm_runtime_register_natives("bedrock", natives, 9)) {
         fprintf(stderr, "register_natives failed\n");
         goto cleanup_wamr;
     }
@@ -498,6 +847,7 @@ cleanup_module:
 cleanup_wamr:
     wasm_runtime_destroy();
 cleanup:
+    local_db_save(&bedrock);
     bedrock_teardown(&bedrock);
 }
 
