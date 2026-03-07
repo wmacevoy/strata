@@ -14,16 +14,22 @@
 /*  Bedrock context — shared by WASM natives and QuickJS bindings   */
 /* ------------------------------------------------------------------ */
 
+#define MAX_PEER_SOCKS 8
+
 typedef struct {
     void *zmq_ctx;
     void *sub_sock;
-    void *req_sock;
+    void *req_sock;      /* default REQ → store_service */
     void *pub_sock;
     void *rep_sock;
     sqlite3 *local_db;
     char den_name[64];
     char den_entity[256];
     char local_db_path[256];
+    /* Peer socket cache — for request(json, endpoint) */
+    void *peer_socks[MAX_PEER_SOCKS];
+    char  peer_endpoints[MAX_PEER_SOCKS][256];
+    int   peer_count;
 } bedrock_ctx_t;
 
 /* ------------------------------------------------------------------ */
@@ -56,8 +62,30 @@ static void bedrock_setup(bedrock_ctx_t *bedrock, strata_den_def *def) {
     }
 }
 
+/* Get or create a cached REQ socket to a peer endpoint */
+static void *bedrock_peer_sock(bedrock_ctx_t *bedrock, const char *endpoint) {
+    for (int i = 0; i < bedrock->peer_count; i++)
+        if (strcmp(bedrock->peer_endpoints[i], endpoint) == 0)
+            return bedrock->peer_socks[i];
+    if (bedrock->peer_count >= MAX_PEER_SOCKS) return NULL;
+    void *sock = zmq_socket(bedrock->zmq_ctx, ZMQ_REQ);
+    if (!sock) return NULL;
+    int timeout = 60000; /* 60s for potentially slow calls */
+    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
+    int linger = 0;
+    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
+    if (zmq_connect(sock, endpoint) != 0) { zmq_close(sock); return NULL; }
+    snprintf(bedrock->peer_endpoints[bedrock->peer_count], 256, "%s", endpoint);
+    bedrock->peer_socks[bedrock->peer_count] = sock;
+    bedrock->peer_count++;
+    return sock;
+}
+
 static void bedrock_teardown(bedrock_ctx_t *bedrock) {
     if (bedrock->local_db) sqlite3_close(bedrock->local_db);
+    for (int i = 0; i < bedrock->peer_count; i++)
+        if (bedrock->peer_socks[i]) zmq_close(bedrock->peer_socks[i]);
     if (bedrock->sub_sock) zmq_close(bedrock->sub_sock);
     if (bedrock->req_sock) zmq_close(bedrock->req_sock);
     if (bedrock->pub_sock) zmq_close(bedrock->pub_sock);
@@ -304,6 +332,23 @@ static int32_t wasm_bedrock_request(wasm_exec_env_t exec_env,
     return zmq_recv(bedrock->req_sock, resp_buf, resp_cap, 0);
 }
 
+static int32_t wasm_bedrock_request_to(wasm_exec_env_t exec_env,
+                                       char *endpoint, int32_t ep_len,
+                                       char *req, int32_t req_len,
+                                       char *resp_buf, int32_t resp_cap) {
+    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
+    if (!bedrock) return -1;
+    char ep[256];
+    int n = ep_len < 255 ? ep_len : 255;
+    memcpy(ep, endpoint, n);
+    ep[n] = '\0';
+    void *sock = bedrock_peer_sock(bedrock, ep);
+    if (!sock) return -1;
+    int rc = zmq_send(sock, req, req_len, 0);
+    if (rc < 0) return -1;
+    return zmq_recv(sock, resp_buf, resp_cap, 0);
+}
+
 static int32_t wasm_bedrock_publish(wasm_exec_env_t exec_env,
                                  char *topic, int32_t topic_len,
                                  char *payload, int32_t payload_len) {
@@ -423,24 +468,50 @@ static JSValue js_bedrock_publish(JSContext *ctx, JSValueConst this_val,
 }
 
 /* JS binding: bedrock.request(msg) -> response string or null */
+/* JS binding: bedrock.request(json [, endpoint]) -> response string or null
+ * 1 arg:  sends to store (default req_sock)
+ * 2 args: sends to arbitrary den/vocation endpoint via cached peer socket */
 static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
     bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
-    if (!bedrock || !bedrock->req_sock || argc < 1) return JS_NULL;
+    if (!bedrock || argc < 1) return JS_NULL;
 
     const char *req = JS_ToCString(ctx, argv[0]);
     if (!req) return JS_NULL;
 
-    int rc = zmq_send(bedrock->req_sock, req, strlen(req), 0);
+    void *sock;
+    const char *endpoint = NULL;
+    if (argc >= 2) {
+        endpoint = JS_ToCString(ctx, argv[1]);
+        if (!endpoint) { JS_FreeCString(ctx, req); return JS_NULL; }
+        sock = bedrock_peer_sock(bedrock, endpoint);
+    } else {
+        sock = bedrock->req_sock;
+    }
+
+    if (!sock) {
+        JS_FreeCString(ctx, req);
+        if (endpoint) JS_FreeCString(ctx, endpoint);
+        return JS_NULL;
+    }
+
+    int rc = zmq_send(sock, req, strlen(req), 0);
     JS_FreeCString(ctx, req);
+    if (endpoint) JS_FreeCString(ctx, endpoint);
     if (rc < 0) return JS_NULL;
 
-    char resp[8192];
-    rc = zmq_recv(bedrock->req_sock, resp, sizeof(resp) - 1, 0);
-    if (rc < 0) return JS_NULL;
+    /* Dynamic receive buffer — peer responses (e.g. API calls) can be large */
+    size_t buf_cap = (argc >= 2) ? (4 * 1024 * 1024) : 8192;
+    char *resp = malloc(buf_cap);
+    if (!resp) return JS_NULL;
+
+    rc = zmq_recv(sock, resp, buf_cap - 1, 0);
+    if (rc < 0) { free(resp); return JS_NULL; }
     resp[rc] = '\0';
-    return JS_NewString(ctx, resp);
+    JSValue result = JS_NewString(ctx, resp);
+    free(resp);
+    return result;
 }
 
 /* JS binding: bedrock.serve_recv() -> request string or null */
@@ -604,7 +675,7 @@ static void js_child_run(strata_den_def *def,
     JS_SetPropertyStr(ctx, bedrock_obj, "publish",
         JS_NewCFunction(ctx, js_bedrock_publish, "publish", 2));
     JS_SetPropertyStr(ctx, bedrock_obj, "request",
-        JS_NewCFunction(ctx, js_bedrock_request, "request", 1));
+        JS_NewCFunction(ctx, js_bedrock_request, "request", 2));
     JS_SetPropertyStr(ctx, bedrock_obj, "serve_recv",
         JS_NewCFunction(ctx, js_bedrock_serve_recv, "serve_recv", 0));
     JS_SetPropertyStr(ctx, bedrock_obj, "serve_send",
@@ -779,15 +850,16 @@ static void wasm_child_run(strata_den_def *def,
         { "subscribe",  (void *)wasm_bedrock_subscribe,   "(*~)i",    NULL },
         { "receive",    (void *)wasm_bedrock_receive,     "(*~*~)i",  NULL },
         { "request",    (void *)wasm_bedrock_request,     "(*~*~)i",  NULL },
+        { "request_to", (void *)wasm_bedrock_request_to,  "(*~*~*~)i",NULL },
         { "publish",    (void *)wasm_bedrock_publish,     "(*~*~)i",  NULL },
         { "serve_recv", (void *)wasm_bedrock_serve_recv,  "(*~)i",    NULL },
         { "serve_send", (void *)wasm_bedrock_serve_send,  "(*~)i",    NULL },
         { "db_exec",    (void *)wasm_bedrock_db_exec,     "(*~)i",    NULL },
         { "db_query",   (void *)wasm_bedrock_db_query,    "(*~*~)i",  NULL },
     };
-    for (int i = 0; i < 9; i++) natives[i].attachment = &bedrock;
+    for (int i = 0; i < 10; i++) natives[i].attachment = &bedrock;
 
-    if (!wasm_runtime_register_natives("bedrock", natives, 9)) {
+    if (!wasm_runtime_register_natives("bedrock", natives, 10)) {
         fprintf(stderr, "register_natives failed\n");
         goto cleanup_wamr;
     }

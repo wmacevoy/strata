@@ -15,6 +15,9 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <zmq.h>
+#ifdef HAVE_MESSENGER
+#include <curl/curl.h>
+#endif
 #include "strata/store.h"
 #include "strata/den.h"
 
@@ -23,12 +26,16 @@ extern int code_smith_run(const char *endpoint, const char *root, int readonly);
 #ifdef HAVE_COBBLER
 extern int cobbler_run(const char *endpoint, const char *root, const char *clang);
 #endif
+#ifdef HAVE_MESSENGER
+extern int messenger_run(const char *endpoint, int timeout);
+#endif
 
 #define DB_PATH       "/tmp/warren_village.db"
 #define PID_FILE      "/tmp/warren_village.pid"
 #define STORE_EP      "tcp://127.0.0.1:5560"
 #define SMITH_EP      "tcp://127.0.0.1:5590"
 #define COBBLER_EP    "tcp://127.0.0.1:5591"
+#define MESSENGER_EP  "tcp://127.0.0.1:5592"
 
 #define GEE_REP       "tcp://127.0.0.1:5570"
 #define INCH_REP      "tcp://127.0.0.1:5571"
@@ -38,11 +45,18 @@ extern int cobbler_run(const char *endpoint, const char *root, const char *clang
 #define INCH_PUB      "tcp://127.0.0.1:5581"
 #define LOOM_PUB      "tcp://127.0.0.1:5582"
 
+#define CLAUDE_REP    "tcp://127.0.0.1:5573"
+#define CLAUDE_PUB    "tcp://127.0.0.1:5583"
+
 static volatile int running = 1;
 static pid_t store_pid = -1;
 static pid_t smith_pid = -1;
 #ifdef HAVE_COBBLER
 static pid_t cobbler_pid = -1;
+#endif
+#ifdef HAVE_MESSENGER
+static pid_t messenger_pid = -1;
+static pid_t claude_pid = -1;
 #endif
 static pid_t gee_pid = -1;
 static pid_t inch_pid = -1;
@@ -58,10 +72,16 @@ static void kill_child(pid_t *pid) {
 }
 
 static void cleanup(void) {
+#ifdef HAVE_MESSENGER
+    kill_child(&claude_pid);
+#endif
     kill_child(&gee_pid);
     kill_child(&inch_pid);
     kill_child(&loom_pid);
     if (host) { strata_den_host_free(host); host = NULL; }
+#ifdef HAVE_MESSENGER
+    kill_child(&messenger_pid);
+#endif
 #ifdef HAVE_COBBLER
     kill_child(&cobbler_pid);
 #endif
@@ -156,6 +176,9 @@ static void init_database(void) {
     strata_role_assign(store, "inch-service", "owner", "inch");
     strata_role_assign(store, "loom-service", "owner", "loom");
 
+    /* Claude agent */
+    strata_role_assign(store, "claude-service", "villager", "town-hall");
+
     strata_store_close(store);
 }
 
@@ -169,6 +192,11 @@ int main(void) {
     unlink(DB_PATH);
     unlink(DB_PATH "-wal");
     unlink(DB_PATH "-shm");
+
+#ifdef HAVE_MESSENGER
+    /* Init curl before any fork — macOS ObjC runtime isn't fork-safe */
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+#endif
 
     fprintf(stderr, "village: initializing database\n");
     init_database();
@@ -230,6 +258,27 @@ int main(void) {
     }
 #endif
 
+#ifdef HAVE_MESSENGER
+    /* Fork messenger vocation */
+    fflush(stdout);
+    fflush(stderr);
+    messenger_pid = fork();
+    if (messenger_pid < 0) { perror("fork messenger"); exit(1); }
+    if (messenger_pid == 0) {
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        _exit(messenger_run(MESSENGER_EP, 120));
+    }
+
+    fprintf(stderr, "village: waiting for messenger on %s\n", MESSENGER_EP);
+    if (!wait_for_store(MESSENGER_EP, 20)) {
+        fprintf(stderr, "village: messenger failed to start (continuing without it)\n");
+        kill_child(&messenger_pid);
+    } else {
+        fprintf(stderr, "village: messenger ready\n");
+    }
+#endif
+
     /* Register dens */
     host = strata_den_host_create();
 
@@ -249,6 +298,14 @@ int main(void) {
         exit(1);
     }
 
+#ifdef HAVE_MESSENGER
+    if (strata_den_js_register(host, "claude", "dens/claude.js",
+            NULL, STORE_EP, CLAUDE_PUB, CLAUDE_REP) != 0) {
+        fprintf(stderr, "village: failed to register claude\n");
+        exit(1);
+    }
+#endif
+
     /* Spawn dens */
     fflush(stdout);
     fflush(stderr);
@@ -265,6 +322,31 @@ int main(void) {
     if (loom_pid <= 0) { fprintf(stderr, "village: failed to spawn loom\n"); exit(1); }
     fprintf(stderr, "village: loom spawned (pid %d) REP=%s PUB=%s\n", loom_pid, LOOM_REP, LOOM_PUB);
 
+#ifdef HAVE_MESSENGER
+    if (messenger_pid > 0) {
+        char claude_event[512];
+        snprintf(claude_event, sizeof(claude_event),
+            "{\"messenger_ep\":\"%s\",\"smith_ep\":\"%s\",\"cobbler_ep\":\"%s\","
+            "\"model\":\"claude-sonnet-4-6\"}",
+            MESSENGER_EP, SMITH_EP,
+#ifdef HAVE_COBBLER
+            cobbler_pid > 0 ? COBBLER_EP : ""
+#else
+            ""
+#endif
+        );
+
+        claude_pid = strata_den_spawn(host, "claude", claude_event, 2);
+        if (claude_pid <= 0) {
+            fprintf(stderr, "village: failed to spawn claude (continuing without it)\n");
+            claude_pid = -1;
+        } else {
+            fprintf(stderr, "village: claude spawned (pid %d) REP=%s PUB=%s\n",
+                    claude_pid, CLAUDE_REP, CLAUDE_PUB);
+        }
+    }
+#endif
+
     usleep(300000); /* let dens bind sockets */
 
     /* Write PID file and report */
@@ -276,9 +358,17 @@ int main(void) {
     if (cobbler_pid > 0)
         fprintf(stderr, "  cobbler:    %s\n", COBBLER_EP);
 #endif
+#ifdef HAVE_MESSENGER
+    if (messenger_pid > 0)
+        fprintf(stderr, "  messenger:  %s\n", MESSENGER_EP);
+#endif
     fprintf(stderr, "  gee:        REP=%s PUB=%s\n", GEE_REP, GEE_PUB);
     fprintf(stderr, "  inch:       REP=%s PUB=%s\n", INCH_REP, INCH_PUB);
     fprintf(stderr, "  loom:       REP=%s PUB=%s\n", LOOM_REP, LOOM_PUB);
+#ifdef HAVE_MESSENGER
+    if (claude_pid > 0)
+        fprintf(stderr, "  claude:     REP=%s PUB=%s\n", CLAUDE_REP, CLAUDE_PUB);
+#endif
     fprintf(stderr, "\n");
 
     /* Block until signaled */
@@ -292,6 +382,10 @@ int main(void) {
             if (died == smith_pid) smith_pid = -1;
 #ifdef HAVE_COBBLER
             if (died == cobbler_pid) cobbler_pid = -1;
+#endif
+#ifdef HAVE_MESSENGER
+            if (died == messenger_pid) messenger_pid = -1;
+            if (died == claude_pid) claude_pid = -1;
 #endif
             if (died == gee_pid) gee_pid = -1;
             if (died == inch_pid) inch_pid = -1;

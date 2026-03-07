@@ -13,10 +13,12 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | context.c | Entity context: stores entity_id, resolves roles for a repo |
 | blob.c | Content-addressed blob storage with tagging + role-based permissions |
 | change.c | ZMQ PUB wrapper for artifact change notifications |
-| den.c | Den host: registers WASM/JS dens, spawns via fork, runs WAMR or QuickJS, manages bedrock ZMQ, per-den local SQLite |
+| den.c | Den host: registers WASM/JS dens, spawns via fork, runs WAMR or QuickJS, manages bedrock ZMQ, per-den local SQLite, peer socket cache for den-to-den requests |
 | code_smith.c | Vocation den: file I/O + shell tools via ZMQ REP (read, write, exec, glob, grep, ls, discover) |
+| cobbler.c | Vocation den: C→WASM compiler via clang, ZMQ REP (compile, compile_file, discover). Optional build. |
+| messenger.c | Vocation den: HTTP client via libcurl, ZMQ REP (fetch, discover). Optional build (requires libcurl). |
 | village.c | Village daemon: remote clone, relay (REQ/REP + SUB/PUB forwarding), migration |
-| warren_village.c | Warren's Village launcher: forks store + code-smith + 3 agent dens, manages lifecycle |
+| warren_village.c | Warren's Village launcher: forks store + code-smith + cobbler + messenger (optional) + agent dens (gee, inch, loom, claude), manages lifecycle |
 
 ### CLI Tools (src/)
 | File | Binary | Purpose |
@@ -47,6 +49,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | loom.js | The synthesizer: tracks word threads, weaves patterns, local SQLite threads/tapestry tables |
 | board.js | Message board: POST/LIST via REP, persists as artifacts, PUBs notifications |
 | claud-homestead.js | Vocation den: builds homesteads, local SQLite tables (homesteads, dens_deployed, repos_tracked) |
+| claude.js | Claude agent: uses messenger (Anthropic API), code-smith (file I/O), cobbler (WASM compile), persistent memory + conversation via local SQLite |
 | gatekeeper.js | Access control: request_join/approve/deny, "destination decides" pattern |
 | echo.wat | Minimal WASM test: on_event() trigger, logs via bedrock |
 
@@ -60,6 +63,9 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | test_board.c | E2E: store_service + board.js via QuickJS, POST/LIST/PUB |
 | test_village.c | Local clone, relay, multi-process bedrock |
 | test_claud_homestead.c | Homestead den lifecycle, local db persistence, respawn restore |
+| test_cobbler.c | Cobbler vocation: compile valid/invalid C, verify WASM magic bytes, say dispatch |
+| test_messenger.c | Messenger vocation: init, discover, HTTP GET/POST, error handling, say dispatch |
+| test_claude.c | Claude den: lifecycle, status, say (graceful without API key), forget, persistence across restart |
 | test_collaboration.c | Full integration: entity auth, gatekeeper, journeyman pattern |
 
 ## Database Schema
@@ -96,8 +102,19 @@ Each den gets a local SQLite database (loaded from store on start, saved back on
 Vocations are dens that provide tools to other dens. Not new infrastructure — same REP socket, same JSON protocol. A vocation is just a den that happens to serve capabilities.
 
 - **code-smith** — file I/O + shell: `read`, `write`, `exec`, `glob`, `grep`, `ls`, `discover`
-- Path-sandboxed to `--root`, optional `--readonly` mode
-- Plain text via `talk` becomes shell commands; JSON messages dispatch directly
+  - Path-sandboxed to `--root`, optional `--readonly` mode
+  - Plain text via `talk` becomes shell commands; JSON messages dispatch directly
+- **cobbler** — C→WASM compiler: `compile`, `compile_file`, `discover`
+  - Wraps clang (auto-detects Homebrew LLVM, then system PATH)
+  - Optional build — requires clang with `--target=wasm32` support
+  - `compile`: inline C source → base64-encoded `.wasm` binary
+  - `compile_file`: path to `.c` file → base64-encoded `.wasm` binary
+  - `COBBLER_NO_MAIN` guard for library vs standalone use
+- **messenger** — HTTP client via libcurl: `fetch`, `discover`
+  - `fetch`: `url`, optional `method` (GET/POST/PUT/DELETE/PATCH), optional `headers` (string[]), optional `body`
+  - Returns `{"ok":true,"status":200,"body":"..."}` with JSON-escaped body
+  - Optional build — requires libcurl (macOS ships it; `MESSENGER_NO_MAIN` guard)
+  - Limits: 1MB request body, 4MB response body, 120s timeout
 - Future vocations: word-smith, mail-smith, etc. — same pattern, different tools
 
 ## Den Execution
@@ -111,11 +128,14 @@ Both share: bedrock ZMQ interface, fork isolation, privilege system.
 **Bedrock API (available in both):**
 - `bedrock.log(msg)` — stderr
 - `bedrock.request(json)` — REQ to store, returns response
+- `bedrock.request(json, endpoint)` — REQ to any den/vocation via cached peer socket (den-to-den communication)
 - `bedrock.subscribe(filter)` / `bedrock.receive()` — SUB events
 - `bedrock.publish(topic, payload)` — PUB notification
 - `bedrock.serve_recv()` / `bedrock.serve_send(resp)` — REP API
 - `bedrock.db_exec(sql)` — execute SQL on per-den local SQLite (returns rows changed)
 - `bedrock.db_query(sql)` — query local SQLite, returns JSON array of row objects
+
+WASM dens use `request_to(endpoint, ep_len, req, req_len, resp_buf, resp_cap)` for the two-arg form.
 
 ## Execution Flow
 
@@ -129,7 +149,7 @@ Both share: bedrock ZMQ interface, fork isolation, privilege system.
 
 ## Warren's Village
 
-Demo village with 3 agent dens + code-smith vocation + human REPL.
+Demo village with agent dens (gee, inch, loom, claude) + vocations (code-smith, cobbler, messenger) + human REPL.
 
 ```
 ./village.sh          # stop, build, start, enter REPL
@@ -138,9 +158,9 @@ Demo village with 3 agent dens + code-smith vocation + human REPL.
 ./village.sh start    # start without rebuild
 ```
 
-**Ports:** store=5560, gee=5570/5580, inch=5571/5581, loom=5572/5582, code-smith=5590
+**Ports:** store=5560, gee=5570/5580, inch=5571/5581, loom=5572/5582, claude=5573/5583, code-smith=5590, cobbler=5591, messenger=5592
 
-**REPL commands:** `talk gee hello!`, `talk code-smith ls dens`, `talk code-smith {"action":"read","path":"src/den.c"}`
+**REPL commands:** `talk gee hello!`, `talk claude hello!`, `talk code-smith ls dens`, `talk code-smith {"action":"read","path":"src/den.c"}`
 
 ## Build
 
@@ -149,6 +169,7 @@ cmake -B build && cmake --build build && cd build && ctest
 ```
 
 Dependencies: SQLite3, ZeroMQ, WAMR (wasm-micro-runtime), OpenSSL (Linux only).
+Optional: LLVM/clang with `--target=wasm32` (for cobbler), libcurl (for messenger — macOS ships it).
 Vendored: QuickJS (vendor/quickjs/).
 
 ## Key Conventions
