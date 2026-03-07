@@ -152,6 +152,38 @@ target_include_directories(code_smith PRIVATE
 )
 target_link_libraries(code_smith ${ZMQ_LIBRARY})
 
+# Cobbler vocation (optional — requires clang with WASM target)
+find_program(WASM_CLANG clang PATHS /opt/homebrew/opt/llvm/bin NO_DEFAULT_PATH)
+if(NOT WASM_CLANG)
+    find_program(WASM_CLANG clang)
+endif()
+if(WASM_CLANG)
+    execute_process(COMMAND ${WASM_CLANG} --target=wasm32 -x c -c -o /dev/null /dev/null
+                    RESULT_VARIABLE WASM_CLANG_RC ERROR_QUIET)
+    if(NOT WASM_CLANG_RC EQUAL 0)
+        set(WASM_CLANG "")
+    endif()
+endif()
+
+if(WASM_CLANG)
+    message(STATUS "Cobbler enabled: ${WASM_CLANG}")
+    add_library(cobbler_lib OBJECT src/cobbler.c)
+    target_include_directories(cobbler_lib PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${ZMQ_INCLUDE_DIR}
+    )
+    target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN)
+
+    add_executable(cobbler src/cobbler.c)
+    target_include_directories(cobbler PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${ZMQ_INCLUDE_DIR}
+    )
+    target_link_libraries(cobbler ${ZMQ_LIBRARY})
+else()
+    message(STATUS "Cobbler disabled: no clang with WASM support found")
+endif()
+
 # Village daemon
 add_executable(village_daemon src/village.c)
 target_include_directories(village_daemon PRIVATE
@@ -178,8 +210,24 @@ target_link_libraries(strata_human_cli strata)
 set_target_properties(strata_human_cli PROPERTIES OUTPUT_NAME "strata-human")
 
 # Warren's Village
-add_executable(warren_village src/warren_village.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib>)
+if(WASM_CLANG)
+    add_executable(warren_village src/warren_village.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:cobbler_lib>)
+    target_compile_definitions(warren_village PRIVATE HAVE_COBBLER)
+else()
+    add_executable(warren_village src/warren_village.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib>)
+endif()
 target_link_libraries(warren_village strata)
+
+# Cobbler test (conditional)
+if(WASM_CLANG)
+    add_executable(test_cobbler test/test_cobbler.c $<TARGET_OBJECTS:cobbler_lib>)
+    target_include_directories(test_cobbler PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${ZMQ_INCLUDE_DIR}
+    )
+    target_link_libraries(test_cobbler ${ZMQ_LIBRARY})
+    add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
 
 # Examples
 add_executable(listener examples/listener.c)

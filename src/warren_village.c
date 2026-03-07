@@ -20,11 +20,15 @@
 
 extern int store_service_run(const char *db_path, const char *endpoint);
 extern int code_smith_run(const char *endpoint, const char *root, int readonly);
+#ifdef HAVE_COBBLER
+extern int cobbler_run(const char *endpoint, const char *root, const char *clang);
+#endif
 
 #define DB_PATH       "/tmp/warren_village.db"
 #define PID_FILE      "/tmp/warren_village.pid"
 #define STORE_EP      "tcp://127.0.0.1:5560"
 #define SMITH_EP      "tcp://127.0.0.1:5590"
+#define COBBLER_EP    "tcp://127.0.0.1:5591"
 
 #define GEE_REP       "tcp://127.0.0.1:5570"
 #define INCH_REP      "tcp://127.0.0.1:5571"
@@ -37,6 +41,9 @@ extern int code_smith_run(const char *endpoint, const char *root, int readonly);
 static volatile int running = 1;
 static pid_t store_pid = -1;
 static pid_t smith_pid = -1;
+#ifdef HAVE_COBBLER
+static pid_t cobbler_pid = -1;
+#endif
 static pid_t gee_pid = -1;
 static pid_t inch_pid = -1;
 static pid_t loom_pid = -1;
@@ -55,6 +62,9 @@ static void cleanup(void) {
     kill_child(&inch_pid);
     kill_child(&loom_pid);
     if (host) { strata_den_host_free(host); host = NULL; }
+#ifdef HAVE_COBBLER
+    kill_child(&cobbler_pid);
+#endif
     kill_child(&smith_pid);
     kill_child(&store_pid);
     unlink(PID_FILE);
@@ -199,6 +209,27 @@ int main(void) {
     }
     fprintf(stderr, "village: code-smith ready\n");
 
+#ifdef HAVE_COBBLER
+    /* Fork cobbler vocation */
+    fflush(stdout);
+    fflush(stderr);
+    cobbler_pid = fork();
+    if (cobbler_pid < 0) { perror("fork cobbler"); exit(1); }
+    if (cobbler_pid == 0) {
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        _exit(cobbler_run(COBBLER_EP, ".", NULL));
+    }
+
+    fprintf(stderr, "village: waiting for cobbler on %s\n", COBBLER_EP);
+    if (!wait_for_store(COBBLER_EP, 20)) {
+        fprintf(stderr, "village: cobbler failed to start (continuing without it)\n");
+        kill_child(&cobbler_pid);
+    } else {
+        fprintf(stderr, "village: cobbler ready\n");
+    }
+#endif
+
     /* Register dens */
     host = strata_den_host_create();
 
@@ -241,6 +272,10 @@ int main(void) {
     fprintf(stderr, "\nvillage: ready\n");
     fprintf(stderr, "  store:      %s\n", STORE_EP);
     fprintf(stderr, "  code-smith: %s\n", SMITH_EP);
+#ifdef HAVE_COBBLER
+    if (cobbler_pid > 0)
+        fprintf(stderr, "  cobbler:    %s\n", COBBLER_EP);
+#endif
     fprintf(stderr, "  gee:        REP=%s PUB=%s\n", GEE_REP, GEE_PUB);
     fprintf(stderr, "  inch:       REP=%s PUB=%s\n", INCH_REP, INCH_PUB);
     fprintf(stderr, "  loom:       REP=%s PUB=%s\n", LOOM_REP, LOOM_PUB);
@@ -255,6 +290,9 @@ int main(void) {
             fprintf(stderr, "village: child %d exited\n", died);
             if (died == store_pid) { store_pid = -1; running = 0; }
             if (died == smith_pid) smith_pid = -1;
+#ifdef HAVE_COBBLER
+            if (died == cobbler_pid) cobbler_pid = -1;
+#endif
             if (died == gee_pid) gee_pid = -1;
             if (died == inch_pid) inch_pid = -1;
             if (died == loom_pid) loom_pid = -1;
