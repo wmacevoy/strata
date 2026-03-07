@@ -13,15 +13,17 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | context.c | Entity context: stores entity_id, resolves roles for a repo |
 | blob.c | Content-addressed blob storage with tagging + role-based permissions |
 | change.c | ZMQ PUB wrapper for artifact change notifications |
-| den.c | Den host: registers WASM/JS dens, spawns via fork, runs WAMR or QuickJS, manages bedrock ZMQ |
+| den.c | Den host: registers WASM/JS dens, spawns via fork, runs WAMR or QuickJS, manages bedrock ZMQ, per-den local SQLite |
+| code_smith.c | Vocation den: file I/O + shell tools via ZMQ REP (read, write, exec, glob, grep, ls, discover) |
 | village.c | Village daemon: remote clone, relay (REQ/REP + SUB/PUB forwarding), migration |
+| warren_village.c | Warren's Village launcher: forks store + code-smith + 3 agent dens, manages lifecycle |
 
 ### CLI Tools (src/)
 | File | Binary | Purpose |
 |------|--------|---------|
 | cli_strata.c | `strata` | Village builder: `--db` for init, `--endpoint` for ZMQ villager mode |
 | cli_strata_den.c | `strata-den` | Container den CLI: all ops via ZMQ REQ/REP |
-| cli_human_den.c | `strata-human` | Interactive REPL: REQ to store + SUB for events |
+| cli_human_den.c | `strata-human` | Interactive REPL: REQ to store + SUB for events + talk to agents |
 | cli_strata_homestead.c | `strata-homestead` | Containerized village: forks store_service + village_daemon |
 | store_service.c | `store_service` | ZMQ REP listener: JSON protocol bridge between dens and SQLite |
 
@@ -40,6 +42,9 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 ### Den Scripts (dens/)
 | File | Purpose |
 |------|---------|
+| gee.js | The curious one: wonders, asks why, local SQLite thoughts table, town-hall aware |
+| inch.js | The precise one: counts, measures, local SQLite observations table, town-hall aware |
+| loom.js | The synthesizer: tracks word threads, weaves patterns, local SQLite threads/tapestry tables |
 | board.js | Message board: POST/LIST via REP, persists as artifacts, PUBs notifications |
 | claud-homestead.js | Vocation den: builds homesteads, pickle/unpickle state via blobs |
 | gatekeeper.js | Access control: request_join/approve/deny, "destination decides" pattern |
@@ -84,6 +89,16 @@ blob_permissions(blob_id, role_name)
 ```
 
 All dens get 4 bedrock sockets: SUB (listen), REQ (store), PUB (notify), REP (serve).
+Each den gets a local SQLite database (loaded from store on start, saved back on stop).
+
+## Vocations
+
+Vocations are dens that provide tools to other dens. Not new infrastructure — same REP socket, same JSON protocol. A vocation is just a den that happens to serve capabilities.
+
+- **code-smith** — file I/O + shell: `read`, `write`, `exec`, `glob`, `grep`, `ls`, `discover`
+- Path-sandboxed to `--root`, optional `--readonly` mode
+- Plain text via `talk` becomes shell commands; JSON messages dispatch directly
+- Future vocations: word-smith, mail-smith, etc. — same pattern, different tools
 
 ## Den Execution
 
@@ -99,6 +114,8 @@ Both share: bedrock ZMQ interface, fork isolation, privilege system.
 - `bedrock.subscribe(filter)` / `bedrock.receive()` — SUB events
 - `bedrock.publish(topic, payload)` — PUB notification
 - `bedrock.serve_recv()` / `bedrock.serve_send(resp)` — REP API
+- `bedrock.db_exec(sql)` — execute SQL on per-den local SQLite (returns rows changed)
+- `bedrock.db_query(sql)` — query local SQLite, returns JSON array of row objects
 
 ## Execution Flow
 
@@ -109,6 +126,21 @@ Both share: bedrock ZMQ interface, fork isolation, privilege system.
 5. Den uses `bedrock.request()` for store CRUD, `bedrock.serve_recv/send()` for API
 6. `artifact_put()` triggers change PUB notification
 7. Remote: `remote_clone()` sends den to remote village, relay bridges endpoints
+
+## Warren's Village
+
+Demo village with 3 agent dens + code-smith vocation + human REPL.
+
+```
+./village.sh          # stop, build, start, enter REPL
+./village.sh stop     # just teardown
+./village.sh build    # just build
+./village.sh start    # start without rebuild
+```
+
+**Ports:** store=5560, gee=5570/5580, inch=5571/5581, loom=5572/5582, code-smith=5590
+
+**REPL commands:** `talk gee hello!`, `talk code-smith ls dens`, `talk code-smith {"action":"read","path":"src/den.c"}`
 
 ## Build
 
@@ -126,6 +158,9 @@ Vendored: QuickJS (vendor/quickjs/).
 - **Role-filtered access:** artifact list/get queries JOIN on artifact_roles + role_assignments. Entity sees only what their roles permit.
 - **Fork isolation:** every den runs in its own process via fork(). No threads for den execution.
 - **JSON protocol:** store_service speaks JSON over ZMQ REP. Actions: put, get, list, init, repo_create, role_assign, role_revoke, privilege_grant, privilege_revoke, privilege_check, entity_register, entity_authenticate, blob_put, blob_get, blob_find, blob_tag, blob_untag, blob_tags.
+- **Vocation pattern:** vocations are dens, not a separate subsystem. Agent carries role, vocation provides hands. Same REP socket, same JSON actions, same `talk` command.
+- **Town-hall as message board:** inter-agent communication via shared artifact repo. Agents post to and read from the board — no direct peer-to-peer.
+- **Per-den local SQLite:** each den gets its own db, loaded from village store (base64 blob) on start, saved back on stop.
 - **Test pattern:** fork store_service in child process, wait for readiness probe, run assertions, cleanup via atexit + signal handlers.
 - **Tests use relative paths** to `dens/` — CMakeLists.txt sets WORKING_DIRECTORY to source root.
 
