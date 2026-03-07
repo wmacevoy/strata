@@ -1,11 +1,12 @@
 /*
  * Integration test for the claud-homestead den.
  *
- * 1. Start store service
- * 2. Set up claud repo + privileges
- * 3. Spawn claud-homestead den
- * 4. Test status, create_repo, init_homestead, pickle
- * 5. Kill den, respawn, verify unpickle restores state
+ * 1. Clean up stale processes and files
+ * 2. Start store service
+ * 3. Set up claud repo + privileges
+ * 4. Spawn claud-homestead den
+ * 5. Test status, create_repo, init_homestead, deploy_den
+ * 6. Kill den, respawn, verify local db restores state
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 extern int store_service_run(const char *db_path, const char *endpoint);
 
 #define DB_PATH        "/tmp/strata_test_claud.db"
+#define DEN_DB         "/tmp/strata_den_claud-homestead.db"
 #define STORE_ENDPOINT "tcp://127.0.0.1:19560"
 #define CLAUD_REP      "tcp://127.0.0.1:19570"
 #define CLAUD_PUB      "tcp://127.0.0.1:19580"
@@ -28,7 +30,27 @@ extern int store_service_run(const char *db_path, const char *endpoint);
 #define TEST(name) do { printf("  %-55s", name); fflush(stdout); } while(0)
 #define PASS()     do { printf("PASS\n"); fflush(stdout); } while(0)
 
-static pid_t store_pid;
+static pid_t store_pid = -1;
+static pid_t claud_pid = -1;
+static strata_den_host *host = NULL;
+
+static void kill_stale_on_port(int port) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "lsof -ti :%d 2>/dev/null | xargs kill -9 2>/dev/null", port);
+    system(cmd);
+}
+
+static void cleanup(void) {
+    if (claud_pid > 0) { kill(claud_pid, SIGTERM); waitpid(claud_pid, NULL, 0); claud_pid = -1; }
+    if (host) { strata_den_host_free(host); host = NULL; }
+    if (store_pid > 0) { kill(store_pid, SIGINT); waitpid(store_pid, NULL, 0); store_pid = -1; }
+    unlink(DB_PATH);
+    unlink(DB_PATH "-wal");
+    unlink(DB_PATH "-shm");
+    unlink(DEN_DB);
+    unlink(DEN_DB "-wal");
+    unlink(DEN_DB "-shm");
+}
 
 static void start_store(void) {
     strata_store *store = strata_store_open_sqlite(DB_PATH);
@@ -42,18 +64,16 @@ static void start_store(void) {
 
     strata_store_close(store);
 
+    fflush(stdout);
+    fflush(stderr);
     store_pid = fork();
     assert(store_pid >= 0);
     if (store_pid == 0) {
-        store_service_run(DB_PATH, STORE_ENDPOINT);
-        _exit(0);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        _exit(store_service_run(DB_PATH, STORE_ENDPOINT));
     }
     usleep(200000);
-}
-
-static void stop_store(void) {
-    kill(store_pid, SIGINT);
-    waitpid(store_pid, NULL, 0);
 }
 
 static int zmq_request(const char *endpoint, const char *req, char *resp, int resp_cap) {
@@ -61,6 +81,8 @@ static int zmq_request(const char *endpoint, const char *req, char *resp, int re
     void *sock = zmq_socket(ctx, ZMQ_REQ);
     int timeout = 5000;
     zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    int linger = 0;
+    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
     zmq_connect(sock, endpoint);
     usleep(50000);
 
@@ -74,9 +96,20 @@ static int zmq_request(const char *endpoint, const char *req, char *resp, int re
 }
 
 int main(void) {
+    /* Clean slate — kill stale processes and files */
+    kill_stale_on_port(19560);
+    kill_stale_on_port(19570);
+    kill_stale_on_port(19580);
+    usleep(100000);
+
     unlink(DB_PATH);
     unlink(DB_PATH "-wal");
     unlink(DB_PATH "-shm");
+    unlink(DEN_DB);
+    unlink(DEN_DB "-wal");
+    unlink(DEN_DB "-shm");
+
+    atexit(cleanup);
 
     printf("test_claud_homestead\n");
     fflush(stdout);
@@ -84,7 +117,7 @@ int main(void) {
     start_store();
 
     /* Register claud-homestead den */
-    strata_den_host *host = strata_den_host_create();
+    host = strata_den_host_create();
     assert(host != NULL);
 
     TEST("register claud-homestead den");
@@ -97,7 +130,9 @@ int main(void) {
 
     /* Spawn */
     TEST("spawn claud-homestead den");
-    pid_t claud_pid = strata_den_spawn(host, "claud-homestead", "{}", 2);
+    fflush(stdout);
+    fflush(stderr);
+    claud_pid = strata_den_spawn(host, "claud-homestead", "{}", 2);
     assert(claud_pid > 0);
     usleep(400000);
     PASS();
@@ -133,7 +168,7 @@ int main(void) {
     assert(strstr(resp, "\"ok\":true") != NULL);
     PASS();
 
-    /* Deploy a den to the homestead (just records it) */
+    /* Deploy a den to the homestead */
     TEST("deploy_den records deployment");
     memset(resp, 0, sizeof(resp));
     rc = zmq_request(CLAUD_REP,
@@ -152,14 +187,6 @@ int main(void) {
     assert(strstr(resp, "\"board\"") != NULL);
     PASS();
 
-    /* Pickle state */
-    TEST("pickle saves state to store");
-    memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUD_REP, "{\"action\":\"pickle\"}", resp, sizeof(resp));
-    assert(rc > 0);
-    assert(strstr(resp, "\"ok\":true") != NULL);
-    PASS();
-
     /* Grant a privilege through the den */
     TEST("grant privilege via den");
     memset(resp, 0, sizeof(resp));
@@ -173,9 +200,12 @@ int main(void) {
     /* Kill the den */
     kill(claud_pid, SIGTERM);
     waitpid(claud_pid, NULL, 0);
+    claud_pid = -1;
 
-    /* Respawn — should unpickle saved state */
-    TEST("respawn + unpickle restores state");
+    /* Respawn — local db should restore state automatically */
+    TEST("respawn restores state from local db");
+    fflush(stdout);
+    fflush(stderr);
     claud_pid = strata_den_spawn(host, "claud-homestead", "{}", 2);
     assert(claud_pid > 0);
     usleep(400000);
@@ -188,15 +218,10 @@ int main(void) {
     assert(strstr(resp, "\"board\"") != NULL);
     PASS();
 
-    /* Cleanup */
+    /* Cleanup via atexit */
     kill(claud_pid, SIGTERM);
     waitpid(claud_pid, NULL, 0);
-
-    strata_den_host_free(host);
-    stop_store();
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    claud_pid = -1;
 
     printf("ALL TESTS PASSED\n");
     return 0;

@@ -1,9 +1,10 @@
 // Claud Homestead — den whose vocation is building homesteads.
 //
-// Pickles/unpickles state to the store as blobs.
 // Configures villages: creates repos, assigns roles, grants privileges.
+// Keeps a local SQLite db as its fossil record.
 //
 // API (via REP socket):
+//   {"action":"say","from":"...","message":"..."}
 //   {"action":"status"}
 //   {"action":"create_repo","repo":"...","name":"..."}
 //   {"action":"grant","entity":"...","privilege":"..."}
@@ -12,13 +13,26 @@
 //   {"action":"role_revoke","entity":"...","role":"...","repo":"..."}
 //   {"action":"init_homestead","name":"...","village_ep":"...","store_ep":"..."}
 //   {"action":"deploy_den","homestead":"...","den_name":"..."}
-//   {"action":"pickle"}
-//   {"action":"unpickle"}
 
+var NAME = "claud-homestead";
 var ENTITY = "claud-service";
-var MAX_REQUESTS = 0;  // unlimited
+var MAX_REQUESTS = 0;
 
-var state = { homesteads: [], version: 1 };
+// --- Local DB setup ---
+
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS homesteads (" +
+    "name TEXT PRIMARY KEY, village_ep TEXT, store_ep TEXT, " +
+    "created_at TEXT DEFAULT (datetime('now')))");
+
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS dens_deployed (" +
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+    "homestead TEXT, den_name TEXT, " +
+    "created_at TEXT DEFAULT (datetime('now')))");
+
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS repos_tracked (" +
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+    "homestead TEXT, repo_id TEXT, " +
+    "created_at TEXT DEFAULT (datetime('now')))");
 
 // --- Store helpers ---
 
@@ -28,73 +42,60 @@ function store_request(obj) {
     return JSON.parse(resp);
 }
 
-// --- Pickle / Unpickle ---
+// --- DB helpers ---
 
-function pickle() {
-    var result = store_request({
-        action: "blob_put",
-        content: JSON.stringify(state),
-        entity: ENTITY,
-        tags: ["claud:context"],
-        roles: ["core"]
-    });
-    return result && result.ok;
+function db_count_homesteads() {
+    var rows = JSON.parse(bedrock.db_query("SELECT COUNT(*) as n FROM homesteads"));
+    return rows[0].n;
 }
 
-function unpickle() {
-    var result = store_request({
-        action: "blob_find",
-        entity: ENTITY,
-        tags: ["claud:context"]
-    });
-    if (result && result.ok && result.blobs && result.blobs.length > 0) {
-        var latest = result.blobs[result.blobs.length - 1];
-        try {
-            state = JSON.parse(latest.content);
-            return true;
-        } catch (e) {
-            bedrock.log("unpickle parse error: " + e.message);
-        }
-    }
-    return false;
+function db_list_homesteads() {
+    return JSON.parse(bedrock.db_query("SELECT * FROM homesteads ORDER BY created_at"));
+}
+
+function db_find_homestead(name) {
+    var rows = JSON.parse(bedrock.db_query(
+        "SELECT * FROM homesteads WHERE name = '" + name + "'"));
+    return rows.length > 0 ? rows[0] : null;
+}
+
+function db_dens_for_homestead(name) {
+    return JSON.parse(bedrock.db_query(
+        "SELECT den_name FROM dens_deployed WHERE homestead = '" + name + "' ORDER BY id"));
+}
+
+function db_repos_for_homestead(name) {
+    return JSON.parse(bedrock.db_query(
+        "SELECT repo_id FROM repos_tracked WHERE homestead = '" + name + "' ORDER BY id"));
 }
 
 // --- Homestead management ---
-
-function find_homestead(name) {
-    for (var i = 0; i < state.homesteads.length; i++) {
-        if (state.homesteads[i].name === name) return state.homesteads[i];
-    }
-    return null;
-}
 
 function handle_init_homestead(req) {
     if (!req.name || !req.village_ep) {
         return {ok: false, error: "missing name or village_ep"};
     }
-    if (find_homestead(req.name)) {
+    if (db_find_homestead(req.name)) {
         return {ok: false, error: "homestead already exists: " + req.name};
     }
-    var hs = {
-        name: req.name,
-        village_ep: req.village_ep,
-        store_ep: req.store_ep || "",
-        repos: [],
-        dens_deployed: []
-    };
-    state.homesteads.push(hs);
+    bedrock.db_exec(
+        "INSERT INTO homesteads (name, village_ep, store_ep) VALUES ('" +
+        req.name + "', '" + (req.village_ep || "") + "', '" + (req.store_ep || "") + "')");
     bedrock.publish("claud/homestead-configured",
         JSON.stringify({name: req.name, village_ep: req.village_ep}));
-    return {ok: true, homestead: hs};
+    return {ok: true, homestead: db_find_homestead(req.name)};
 }
 
 function handle_deploy_den(req) {
     if (!req.homestead || !req.den_name) {
         return {ok: false, error: "missing homestead or den_name"};
     }
-    var hs = find_homestead(req.homestead);
-    if (!hs) return {ok: false, error: "unknown homestead: " + req.homestead};
-    hs.dens_deployed.push(req.den_name);
+    if (!db_find_homestead(req.homestead)) {
+        return {ok: false, error: "unknown homestead: " + req.homestead};
+    }
+    bedrock.db_exec(
+        "INSERT INTO dens_deployed (homestead, den_name) VALUES ('" +
+        req.homestead + "', '" + req.den_name + "')");
     bedrock.publish("claud/den-deployed",
         JSON.stringify({homestead: req.homestead, den: req.den_name}));
     return {ok: true};
@@ -110,10 +111,10 @@ function handle_create_repo(req) {
         action: "repo_create", repo: req.repo, name: req.name
     });
     if (result && result.ok) {
-        // Track in homestead if specified
-        if (req.homestead) {
-            var hs = find_homestead(req.homestead);
-            if (hs) hs.repos.push(req.repo);
+        if (req.homestead && db_find_homestead(req.homestead)) {
+            bedrock.db_exec(
+                "INSERT INTO repos_tracked (homestead, repo_id) VALUES ('" +
+                req.homestead + "', '" + req.repo + "')");
         }
     }
     return result || {ok: false, error: "store unavailable"};
@@ -155,15 +156,32 @@ function handle_role_revoke(req) {
     }) || {ok: false, error: "store unavailable"};
 }
 
+// --- Status ---
+
+function handle_status() {
+    var homesteads = db_list_homesteads();
+    for (var i = 0; i < homesteads.length; i++) {
+        var dens = db_dens_for_homestead(homesteads[i].name);
+        var repos = db_repos_for_homestead(homesteads[i].name);
+        homesteads[i].dens_deployed = [];
+        homesteads[i].repos = [];
+        for (var j = 0; j < dens.length; j++)
+            homesteads[i].dens_deployed.push(dens[j].den_name);
+        for (var k = 0; k < repos.length; k++)
+            homesteads[i].repos.push(repos[k].repo_id);
+    }
+    return {ok: true, homesteads: homesteads};
+}
+
 // --- Serve loop ---
 
-bedrock.log("claud-homestead starting");
+bedrock.log(NAME + " waking up");
 
-// Unpickle saved state
-if (unpickle()) {
-    bedrock.log("unpickled state: " + state.homesteads.length + " homesteads");
+var hs_count = db_count_homesteads();
+if (hs_count > 0) {
+    bedrock.log(NAME + " resumed — " + hs_count + " homesteads on file");
 } else {
-    bedrock.log("no saved state, starting fresh");
+    bedrock.log(NAME + " starting fresh");
 }
 
 var count = 0;
@@ -174,13 +192,11 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
     var response;
     try {
         var req = JSON.parse(raw);
-        if (req.action === "status") {
-            response = JSON.stringify({ok: true, state: state});
-        } else if (req.action === "pickle") {
-            response = JSON.stringify({ok: pickle()});
-        } else if (req.action === "unpickle") {
-            var ok = unpickle();
-            response = JSON.stringify({ok: ok, state: state});
+        if (req.action === "say") {
+            response = JSON.stringify({ok: true, from: NAME,
+                response: "I build homesteads. Try: status, init_homestead, deploy_den"});
+        } else if (req.action === "status") {
+            response = JSON.stringify(handle_status());
         } else if (req.action === "init_homestead") {
             response = JSON.stringify(handle_init_homestead(req));
         } else if (req.action === "deploy_den") {
@@ -206,6 +222,4 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
     count++;
 }
 
-// Pickle on exit
-pickle();
-bedrock.log("claud-homestead exiting after " + count + " requests");
+bedrock.log(NAME + " going to sleep after " + count + " conversations");
