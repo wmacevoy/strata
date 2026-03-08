@@ -84,6 +84,9 @@ target_compile_definitions(quickjs PRIVATE
 )
 # Suppress warnings in vendored code
 target_compile_options(quickjs PRIVATE -w)
+if(NOT APPLE)
+    target_link_libraries(quickjs m)
+endif()
 
 # Strata library
 add_library(strata
@@ -182,8 +185,12 @@ if(NOT WASM_CLANG)
     find_program(WASM_CLANG clang)
 endif()
 if(WASM_CLANG)
-    execute_process(COMMAND ${WASM_CLANG} --target=wasm32 -x c -c -o /dev/null /dev/null
+    # Test compile + link (needs wasm-ld linker, not just clang -c)
+    file(WRITE ${CMAKE_BINARY_DIR}/_wasm_test.c "void _start(void){}")
+    execute_process(COMMAND ${WASM_CLANG} --target=wasm32 -nostdlib
+                    ${CMAKE_BINARY_DIR}/_wasm_test.c -o ${CMAKE_BINARY_DIR}/_wasm_test.wasm
                     RESULT_VARIABLE WASM_CLANG_RC ERROR_QUIET)
+    file(REMOVE ${CMAKE_BINARY_DIR}/_wasm_test.c ${CMAKE_BINARY_DIR}/_wasm_test.wasm)
     if(NOT WASM_CLANG_RC EQUAL 0)
         set(WASM_CLANG "")
     endif()
