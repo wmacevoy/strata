@@ -156,9 +156,9 @@ add_executable(test_village test/test_village.c $<TARGET_OBJECTS:store_service_l
 target_link_libraries(test_village strata)
 add_test(NAME test_village COMMAND test_village WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_executable(test_claud_homestead test/test_claud_homestead.c $<TARGET_OBJECTS:store_service_lib>)
-target_link_libraries(test_claud_homestead strata)
-add_test(NAME test_claud_homestead COMMAND test_claud_homestead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_executable(test_claude_homestead test/test_claude_homestead.c $<TARGET_OBJECTS:store_service_lib>)
+target_link_libraries(test_claude_homestead strata)
+add_test(NAME test_claude_homestead COMMAND test_claude_homestead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_collaboration test/test_collaboration.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_collaboration strata)

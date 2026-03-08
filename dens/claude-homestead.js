@@ -1,7 +1,7 @@
-// Claud Homestead — den whose vocation is building homesteads.
+// Claude Homestead — den whose vocation is building homesteads.
 //
 // Configures villages: creates repos, assigns roles, grants privileges.
-// Keeps a local SQLite db as its fossil record.
+// Persists conversation history and key-value memory in local SQLite.
 //
 // API (via REP socket):
 //   {"action":"say","from":"...","message":"..."}
@@ -13,9 +13,12 @@
 //   {"action":"role_revoke","entity":"...","role":"...","repo":"..."}
 //   {"action":"init_homestead","name":"...","village_ep":"...","store_ep":"..."}
 //   {"action":"deploy_den","homestead":"...","den_name":"..."}
+//   {"action":"memory","key":"..."}          // get/list memory
+//   {"action":"remember","key":"...","value":"..."}
+//   {"action":"forget"}                      // clear conversations, keep memory + homestead state
 
-var NAME = "claud-homestead";
-var ENTITY = "claud-service";
+var NAME = "claude-homestead";
+var ENTITY = "claude-homestead-service";
 var MAX_REQUESTS = 0;
 
 // --- Local DB setup ---
@@ -34,6 +37,15 @@ bedrock.db_exec("CREATE TABLE IF NOT EXISTS repos_tracked (" +
     "homestead TEXT, repo_id TEXT, " +
     "created_at TEXT DEFAULT (datetime('now')))");
 
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS conversations (" +
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+    "role TEXT, content TEXT, " +
+    "ts TEXT DEFAULT (datetime('now')))");
+
+bedrock.db_exec("CREATE TABLE IF NOT EXISTS memory (" +
+    "key TEXT PRIMARY KEY, value TEXT, " +
+    "updated_at TEXT DEFAULT (datetime('now')))");
+
 // --- Store helpers ---
 
 function store_request(obj) {
@@ -42,7 +54,7 @@ function store_request(obj) {
     return JSON.parse(resp);
 }
 
-// --- DB helpers ---
+// --- Homestead DB helpers ---
 
 function db_count_homesteads() {
     var rows = JSON.parse(bedrock.db_query("SELECT COUNT(*) as n FROM homesteads"));
@@ -69,6 +81,56 @@ function db_repos_for_homestead(name) {
         "SELECT repo_id FROM repos_tracked WHERE homestead = '" + name + "' ORDER BY id"));
 }
 
+// --- Conversation helpers ---
+
+function db_save_message(role, content) {
+    var esc_content = content.replace(/'/g, "''");
+    bedrock.db_exec("INSERT INTO conversations (role, content) VALUES ('" +
+        role + "', '" + esc_content + "')");
+}
+
+function db_get_history(limit) {
+    var rows = JSON.parse(bedrock.db_query(
+        "SELECT role, content FROM conversations ORDER BY id DESC LIMIT " +
+        (limit || 20)));
+    rows.reverse();
+    return rows;
+}
+
+function db_count_messages() {
+    var rows = JSON.parse(bedrock.db_query(
+        "SELECT COUNT(*) as cnt FROM conversations"));
+    return rows[0].cnt;
+}
+
+function db_clear_conversations() {
+    bedrock.db_exec("DELETE FROM conversations");
+}
+
+// --- Memory helpers ---
+
+function db_remember(key, value) {
+    var esc_key = key.replace(/'/g, "''");
+    var esc_val = value.replace(/'/g, "''");
+    bedrock.db_exec(
+        "INSERT INTO memory (key, value, updated_at) VALUES ('" +
+        esc_key + "', '" + esc_val + "', datetime('now')) " +
+        "ON CONFLICT(key) DO UPDATE SET value = '" + esc_val +
+        "', updated_at = datetime('now')");
+}
+
+function db_recall(key) {
+    var esc_key = key.replace(/'/g, "''");
+    var rows = JSON.parse(bedrock.db_query(
+        "SELECT value FROM memory WHERE key = '" + esc_key + "'"));
+    return rows.length > 0 ? rows[0].value : null;
+}
+
+function db_list_memory() {
+    return JSON.parse(bedrock.db_query(
+        "SELECT key, value FROM memory ORDER BY updated_at DESC"));
+}
+
 // --- Homestead management ---
 
 function handle_init_homestead(req) {
@@ -81,7 +143,7 @@ function handle_init_homestead(req) {
     bedrock.db_exec(
         "INSERT INTO homesteads (name, village_ep, store_ep) VALUES ('" +
         req.name + "', '" + (req.village_ep || "") + "', '" + (req.store_ep || "") + "')");
-    bedrock.publish("claud/homestead-configured",
+    bedrock.publish("claude-homestead/configured",
         JSON.stringify({name: req.name, village_ep: req.village_ep}));
     return {ok: true, homestead: db_find_homestead(req.name)};
 }
@@ -96,7 +158,7 @@ function handle_deploy_den(req) {
     bedrock.db_exec(
         "INSERT INTO dens_deployed (homestead, den_name) VALUES ('" +
         req.homestead + "', '" + req.den_name + "')");
-    bedrock.publish("claud/den-deployed",
+    bedrock.publish("claude-homestead/den-deployed",
         JSON.stringify({homestead: req.homestead, den: req.den_name}));
     return {ok: true};
 }
@@ -156,6 +218,47 @@ function handle_role_revoke(req) {
     }) || {ok: false, error: "store unavailable"};
 }
 
+// --- Say ---
+
+function handle_say(req) {
+    var message = req.message || "";
+    if (!message) return {ok: false, error: "message required"};
+
+    var from = req.from || "unknown";
+    bedrock.log(NAME + " heard from " + from + ": " + message.substring(0, 80));
+
+    db_save_message("user", message);
+
+    var response_text = "I build homesteads. Try: status, init_homestead, deploy_den, memory, remember, forget";
+
+    db_save_message("assistant", response_text);
+
+    return {ok: true, from: NAME, response: response_text};
+}
+
+// --- Memory ---
+
+function handle_memory(req) {
+    if (req.key) {
+        var val = db_recall(req.key);
+        return {ok: true, key: req.key, value: val};
+    }
+    return {ok: true, memory: db_list_memory()};
+}
+
+function handle_remember(req) {
+    if (!req.key || !req.value) {
+        return {ok: false, error: "missing key or value"};
+    }
+    db_remember(req.key, req.value);
+    return {ok: true, stored: req.key};
+}
+
+function handle_forget() {
+    db_clear_conversations();
+    return {ok: true, message: "conversation history cleared, memory and homestead state retained"};
+}
+
 // --- Status ---
 
 function handle_status() {
@@ -170,7 +273,12 @@ function handle_status() {
         for (var k = 0; k < repos.length; k++)
             homesteads[i].repos.push(repos[k].repo_id);
     }
-    return {ok: true, homesteads: homesteads};
+    return {
+        ok: true,
+        homesteads: homesteads,
+        conversation_length: db_count_messages(),
+        memory: db_list_memory()
+    };
 }
 
 // --- Serve loop ---
@@ -178,8 +286,9 @@ function handle_status() {
 bedrock.log(NAME + " waking up");
 
 var hs_count = db_count_homesteads();
-if (hs_count > 0) {
-    bedrock.log(NAME + " resumed — " + hs_count + " homesteads on file");
+var msg_count = db_count_messages();
+if (hs_count > 0 || msg_count > 0) {
+    bedrock.log(NAME + " resumed — " + hs_count + " homesteads, " + msg_count + " messages in history");
 } else {
     bedrock.log(NAME + " starting fresh");
 }
@@ -193,8 +302,7 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
     try {
         var req = JSON.parse(raw);
         if (req.action === "say") {
-            response = JSON.stringify({ok: true, from: NAME,
-                response: "I build homesteads. Try: status, init_homestead, deploy_den"});
+            response = JSON.stringify(handle_say(req));
         } else if (req.action === "status") {
             response = JSON.stringify(handle_status());
         } else if (req.action === "init_homestead") {
@@ -211,6 +319,12 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
             response = JSON.stringify(handle_role_assign(req));
         } else if (req.action === "role_revoke") {
             response = JSON.stringify(handle_role_revoke(req));
+        } else if (req.action === "memory") {
+            response = JSON.stringify(handle_memory(req));
+        } else if (req.action === "remember") {
+            response = JSON.stringify(handle_remember(req));
+        } else if (req.action === "forget") {
+            response = JSON.stringify(handle_forget());
         } else {
             response = JSON.stringify({ok: false, error: "unknown action: " + req.action});
         }

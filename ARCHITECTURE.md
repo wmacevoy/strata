@@ -6,7 +6,7 @@ Strata is a secure multi-tenant SCM and agent orchestration platform. The founda
 
 ```
 Layer 6: Fossil         — human-facing timeline, history, diffs (built on blobs)
-Layer 5: Vocations      — dens that serve capabilities (code-smith, claud-homestead)
+Layer 5: Vocations      — dens that serve capabilities (code-smith, claude-homestead)
 Layer 4: Dens           — sandboxed execution, bedrock API, preserve/restore
 Layer 3: Services       — store_service JSON bridge, village daemon
 Layer 2: Store          — repos, roles, entities, privileges
@@ -250,7 +250,7 @@ Preserved Blob = {
 
 Preserve on close: village sends close request, den responds by serializing its state and leaving a restore entrypoint. Restore elsewhere: the preserved blob travels to another village and spawns a complete den — code, state, instructions, identity. The destination village doesn't need to know anything about the den in advance.
 
-**Relocating is a vocation.** claud-homestead's `deploy_den` becomes: preserve a den in village A, transport the blob, restore it in village B.
+**Relocating is a vocation.** claude-homestead's `deploy_den` becomes: preserve a den in village A, transport the blob, restore it in village B.
 
 **2. Journeyman** — Den stays alive, works remotely via relay. No death/rebirth cycle. The relay bridges ZMQ sockets across villages. State stays in the running process. No preserve needed.
 
@@ -345,7 +345,7 @@ Plain text via `talk` becomes shell commands. JSON messages dispatch directly.
 
 Key file: `code_smith.c`.
 
-### claud-homestead
+### claude-homestead
 
 Village builder vocation. Manages homestead infrastructure.
 
@@ -360,7 +360,7 @@ Village builder vocation. Manages homestead infrastructure.
 
 Local SQLite tables: `homesteads`, `dens_deployed`, `repos_tracked`.
 
-Key file: `dens/claud-homestead.js`.
+Key file: `dens/claude-homestead.js`.
 
 ### cobbler (planned — heavyweight, optional)
 
@@ -385,7 +385,7 @@ C source → cobbler (libclang/LLVM) → .wasm blob → preservable den
 → {"ok":true, "blob_id":"sha256...", "size":4096}
 ```
 
-The output blob is a `.wasm` binary — a complete den ready for preserve/restore. Combined with claud-homestead's `deploy_den`, the full cycle is: write C → cobbler compiles to WASM → blob stored → claud-homestead deploys to target village → den restored and running.
+The output blob is a `.wasm` binary — a complete den ready for preserve/restore. Combined with claude-homestead's `deploy_den`, the full cycle is: write C → cobbler compiles to WASM → blob stored → claude-homestead deploys to target village → den restored and running.
 
 **Phase 2 (later):** Self-hosting compiler inside the sandbox. Two candidate paths:
 
@@ -487,7 +487,7 @@ Dens don't talk directly to each other. Two patterns:
 | 2: Store | Repos, artifacts, roles, privileges, entity auth | Shamir trust tiers, vouch system, attribute engine |
 | 3: Services | store_service, village daemon, code-smith | Encrypted sync, ACL enforcement on ZMQ |
 | 4: Dens | JS + WASM runtimes, bedrock API, basic local_db save/load | Rich preserve (source + state + restore plan), quarantine |
-| 5: Vocations | code-smith, claud-homestead | cobbler (LLVM→WASM compiler, then self-hosting), word-smith, mail-smith |
+| 5: Vocations | code-smith, claude-homestead | cobbler (LLVM→WASM compiler, then self-hosting), word-smith, mail-smith |
 | 6: Fossil | strata-human REPL, basic artifact browsing | Full timeline/diff/branch UI |
 
 ### Rich Preserve/Restore (target)

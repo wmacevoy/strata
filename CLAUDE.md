@@ -48,7 +48,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | inch.js | The precise one: counts, measures, local SQLite observations table, town-hall aware |
 | loom.js | The synthesizer: tracks word threads, weaves patterns, local SQLite threads/tapestry tables |
 | board.js | Message board: POST/LIST via REP, persists as artifacts, PUBs notifications |
-| claud-homestead.js | Vocation den: builds homesteads, local SQLite tables (homesteads, dens_deployed, repos_tracked) |
+| claude-homestead.js | Vocation den: builds homesteads, local SQLite tables (homesteads, dens_deployed, repos_tracked, conversations, memory) |
 | claude.js | Claude agent: uses messenger (Anthropic API), code-smith (file I/O), cobbler (WASM compile), persistent memory + conversation via local SQLite |
 | gatekeeper.js | Access control: request_join/approve/deny, "destination decides" pattern |
 | echo.wat | Minimal WASM test: on_event() trigger, logs via bedrock |
@@ -62,7 +62,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | test_den.c | Den host, register WASM (echo.wat), spawn, reap |
 | test_board.c | E2E: store_service + board.js via QuickJS, POST/LIST/PUB |
 | test_village.c | Local clone, relay, multi-process bedrock |
-| test_claud_homestead.c | Homestead den lifecycle, local db persistence, respawn restore |
+| test_claude_homestead.c | Homestead den lifecycle, conversation/memory persistence, respawn restore |
 | test_cobbler.c | Cobbler vocation: compile valid/invalid C, verify WASM magic bytes, say dispatch |
 | test_messenger.c | Messenger vocation: init, discover, HTTP GET/POST, error handling, say dispatch |
 | test_claude.c | Claude den: lifecycle, status, say (graceful without API key), forget, persistence across restart |
