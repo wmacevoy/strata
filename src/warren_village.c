@@ -1,10 +1,10 @@
 /*
- * Warren's Village — launcher for 3 agent dens + human entry point.
+ * Warren's Village — launcher for agent dens + vocations.
  *
  * Startup:
  *   1. Init SQLite schema, create repos, assign roles
- *   2. Fork store_service
- *   3. Register & spawn gee, inch, loom JS dens
+ *   2. Fork store_service, code-smith, messenger, cobbler (optional)
+ *   3. Register & spawn gee, inch, loom, claude JS dens
  *   4. Block until SIGTERM/SIGINT
  *   5. Cleanup: kill children, reap, delete PID file
  */

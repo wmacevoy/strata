@@ -18,7 +18,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | cobbler.c | Vocation den: C→WASM compiler via clang, ZMQ REP (compile, compile_file, discover). Optional build. |
 | messenger.c | Vocation den: HTTP client via vendored libcurl, ZMQ REP (fetch, discover) |
 | village.c | Village daemon: remote clone, relay (REQ/REP + SUB/PUB forwarding), migration |
-| warren_village.c | Warren's Village launcher: forks store + code-smith + cobbler + messenger (optional) + agent dens (gee, inch, loom, claude), manages lifecycle |
+| warren_village.c | Warren's Village launcher: forks store + code-smith + messenger + cobbler (optional) + agent dens (gee, inch, loom, claude), manages lifecycle |
 
 ### CLI Tools (src/)
 | File | Binary | Purpose |
@@ -91,10 +91,12 @@ blob_permissions(blob_id, role_name)
   change.c (PUB) ──→ dens/CLI (SUB)          # artifact change events
   den (PUB)      ──→ subscribers (SUB)        # den-specific notifications
   den (REP)      ──→ clients (REQ)            # den API (e.g. board POST/LIST)
+  den (REQ)      ──→ vocation (REP)           # den-to-den via bedrock.request(json, endpoint)
   village (REP)  ──→ remote villages          # clone requests, relay
 ```
 
 All dens get 4 bedrock sockets: SUB (listen), REQ (store), PUB (notify), REP (serve).
+Dens can also open peer REQ sockets to other dens/vocations via `bedrock.request(json, endpoint)` — cached, 60s timeout, max 8 peers.
 Each den gets a local SQLite database (loaded from store on start, saved back on stop).
 
 ## Vocations
