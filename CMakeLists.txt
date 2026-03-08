@@ -39,19 +39,29 @@ if(NOT WAMR_INCLUDE_DIR OR NOT WAMR_LIBRARY)
     message(FATAL_ERROR "WAMR (wasm-micro-runtime) not found")
 endif()
 
-# libcurl
+# libcurl (vendored — HTTP/HTTPS only, static)
+set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS_CURL ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(HTTP_ONLY ON CACHE BOOL "" FORCE)
+set(CURL_ZLIB OFF CACHE BOOL "" FORCE)
+set(CURL_BROTLI OFF CACHE BOOL "" FORCE)
+set(CURL_ZSTD OFF CACHE BOOL "" FORCE)
+set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
+set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
+set(USE_NGHTTP2 OFF CACHE BOOL "" FORCE)
+set(ENABLE_UNIX_SOCKETS OFF CACHE BOOL "" FORCE)
+set(USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
 if(APPLE)
-    list(APPEND CMAKE_PREFIX_PATH "${HOMEBREW_PREFIX}/opt/curl")
-endif()
-find_path(CURL_INCLUDE_DIR curl/curl.h)
-find_library(CURL_LIBRARY curl)
-if(CURL_INCLUDE_DIR AND CURL_LIBRARY)
-    message(STATUS "libcurl found: ${CURL_LIBRARY}")
-    set(HAVE_LIBCURL TRUE)
+    set(CURL_USE_SECTRANSP ON CACHE BOOL "" FORCE)
+    set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
 else()
-    message(STATUS "libcurl not found — messenger vocation disabled")
-    set(HAVE_LIBCURL FALSE)
+    set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
 endif()
+add_subdirectory(vendor/curl EXCLUDE_FROM_ALL)
+target_compile_options(libcurl_static PRIVATE -w)
 
 # OpenSSL (needed on Linux for SHA-256; macOS uses CommonCrypto)
 if(NOT APPLE)
@@ -198,24 +208,21 @@ else()
     message(STATUS "Cobbler disabled: no clang with WASM support found")
 endif()
 
-# Messenger vocation (optional — requires libcurl)
-if(HAVE_LIBCURL)
-    add_library(messenger_lib OBJECT src/messenger.c)
-    target_include_directories(messenger_lib PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${ZMQ_INCLUDE_DIR}
-        ${CURL_INCLUDE_DIR}
-    )
-    target_compile_definitions(messenger_lib PRIVATE MESSENGER_NO_MAIN)
+# Messenger vocation (HTTP client via vendored libcurl)
+add_library(messenger_lib OBJECT src/messenger.c)
+target_include_directories(messenger_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(messenger_lib libcurl_static)
+target_compile_definitions(messenger_lib PRIVATE MESSENGER_NO_MAIN)
 
-    add_executable(messenger src/messenger.c)
-    target_include_directories(messenger PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${ZMQ_INCLUDE_DIR}
-        ${CURL_INCLUDE_DIR}
-    )
-    target_link_libraries(messenger ${ZMQ_LIBRARY} ${CURL_LIBRARY})
-endif()
+add_executable(messenger src/messenger.c)
+target_include_directories(messenger PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(messenger ${ZMQ_LIBRARY} libcurl_static)
 
 # Village daemon
 add_executable(village_daemon src/village.c)
@@ -243,24 +250,17 @@ target_link_libraries(strata_human_cli strata)
 set_target_properties(strata_human_cli PROPERTIES OUTPUT_NAME "strata-human")
 
 # Warren's Village
-set(WARREN_OBJECTS $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib>)
+set(WARREN_OBJECTS $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:messenger_lib>)
 set(WARREN_DEFS "")
 if(WASM_CLANG)
     list(APPEND WARREN_OBJECTS $<TARGET_OBJECTS:cobbler_lib>)
     list(APPEND WARREN_DEFS HAVE_COBBLER)
 endif()
-if(HAVE_LIBCURL)
-    list(APPEND WARREN_OBJECTS $<TARGET_OBJECTS:messenger_lib>)
-    list(APPEND WARREN_DEFS HAVE_MESSENGER)
-endif()
 add_executable(warren_village src/warren_village.c ${WARREN_OBJECTS})
 if(WARREN_DEFS)
     target_compile_definitions(warren_village PRIVATE ${WARREN_DEFS})
 endif()
-target_link_libraries(warren_village strata)
-if(HAVE_LIBCURL)
-    target_link_libraries(warren_village ${CURL_LIBRARY})
-endif()
+target_link_libraries(warren_village strata libcurl_static)
 
 # Cobbler test (conditional)
 if(WASM_CLANG)
@@ -273,29 +273,23 @@ if(WASM_CLANG)
     add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
-# Messenger test (conditional)
-if(HAVE_LIBCURL)
-    add_executable(test_messenger test/test_messenger.c $<TARGET_OBJECTS:messenger_lib>)
-    target_include_directories(test_messenger PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${ZMQ_INCLUDE_DIR}
-        ${CURL_INCLUDE_DIR}
-    )
-    target_link_libraries(test_messenger ${ZMQ_LIBRARY} ${CURL_LIBRARY})
-    add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-endif()
+# Messenger test
+add_executable(test_messenger test/test_messenger.c $<TARGET_OBJECTS:messenger_lib>)
+target_include_directories(test_messenger PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(test_messenger ${ZMQ_LIBRARY} libcurl_static)
+add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# Claude den test (conditional — needs messenger + store)
-if(HAVE_LIBCURL)
-    add_executable(test_claude test/test_claude.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:messenger_lib>)
-    target_include_directories(test_claude PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${ZMQ_INCLUDE_DIR}
-        ${CURL_INCLUDE_DIR}
-    )
-    target_link_libraries(test_claude strata ${CURL_LIBRARY})
-    add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-endif()
+# Claude den test
+add_executable(test_claude test/test_claude.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:messenger_lib>)
+target_include_directories(test_claude PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(test_claude strata libcurl_static)
+add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # Examples
 add_executable(listener examples/listener.c)

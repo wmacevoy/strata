@@ -16,7 +16,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | den.c | Den host: registers WASM/JS dens, spawns via fork, runs WAMR or QuickJS, manages bedrock ZMQ, per-den local SQLite, peer socket cache for den-to-den requests |
 | code_smith.c | Vocation den: file I/O + shell tools via ZMQ REP (read, write, exec, glob, grep, ls, discover) |
 | cobbler.c | Vocation den: C→WASM compiler via clang, ZMQ REP (compile, compile_file, discover). Optional build. |
-| messenger.c | Vocation den: HTTP client via libcurl, ZMQ REP (fetch, discover). Optional build (requires libcurl). |
+| messenger.c | Vocation den: HTTP client via vendored libcurl, ZMQ REP (fetch, discover) |
 | village.c | Village daemon: remote clone, relay (REQ/REP + SUB/PUB forwarding), migration |
 | warren_village.c | Warren's Village launcher: forks store + code-smith + cobbler + messenger (optional) + agent dens (gee, inch, loom, claude), manages lifecycle |
 
@@ -113,7 +113,6 @@ Vocations are dens that provide tools to other dens. Not new infrastructure — 
 - **messenger** — HTTP client via libcurl: `fetch`, `discover`
   - `fetch`: `url`, optional `method` (GET/POST/PUT/DELETE/PATCH), optional `headers` (string[]), optional `body`
   - Returns `{"ok":true,"status":200,"body":"..."}` with JSON-escaped body
-  - Optional build — requires libcurl (macOS ships it; `MESSENGER_NO_MAIN` guard)
   - Limits: 1MB request body, 4MB response body, 120s timeout
 - Future vocations: word-smith, mail-smith, etc. — same pattern, different tools
 
@@ -169,8 +168,8 @@ cmake -B build && cmake --build build && cd build && ctest
 ```
 
 Dependencies: SQLite3, ZeroMQ, WAMR (wasm-micro-runtime), OpenSSL (Linux only).
-Optional: LLVM/clang with `--target=wasm32` (for cobbler), libcurl (for messenger — macOS ships it).
-Vendored: QuickJS (vendor/quickjs/).
+Optional: LLVM/clang with `--target=wasm32` (for cobbler).
+Vendored: QuickJS (vendor/quickjs/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS only, SecureTransport on macOS, OpenSSL on Linux).
 
 ## Key Conventions
 
