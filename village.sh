@@ -8,6 +8,7 @@
 #   ./village.sh start    # start without rebuild (must be built already)
 #   ./village.sh build    # just build village + human CLI
 #   ./village.sh all      # stop, build all targets (including tests)
+#   ./village.sh test     # stop, build all, run tests
 #
 
 set -e
@@ -57,10 +58,14 @@ stop_village() {
 }
 
 build_village() {
-    if ! command -v cmake &>/dev/null; then
-        echo "ERROR: cmake not found. Install with: brew install cmake (macOS) or sudo apt install cmake (Debian/Ubuntu)"
-        exit 1
-    fi
+    for cmd in cmake cc make; do
+        if ! command -v $cmd &>/dev/null; then
+            echo "ERROR: $cmd not found."
+            echo "  macOS:         brew install cmake"
+            echo "  Debian/Ubuntu: sudo apt install build-essential cmake"
+            exit 1
+        fi
+    done
     echo "building..."
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
@@ -133,6 +138,24 @@ case "${1:-}" in
         cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug
         cmake --build . -j4
         echo "build complete."
+        ;;
+    test)
+        stop_village
+        for cmd in cmake cc make; do
+            if ! command -v $cmd &>/dev/null; then
+                echo "ERROR: $cmd not found."
+                echo "  macOS:         brew install cmake"
+                echo "  Debian/Ubuntu: sudo apt install build-essential cmake"
+                exit 1
+            fi
+        done
+        echo "building all targets..."
+        mkdir -p "$BUILD_DIR"
+        cd "$BUILD_DIR"
+        cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug
+        cmake --build . -j4
+        echo "running tests..."
+        ctest --output-on-failure
         ;;
     start)
         start_village
