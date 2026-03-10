@@ -57,12 +57,11 @@ stop_village() {
     echo "village stopped."
 }
 
-build_village() {
+check_deps() {
     local missing=""
     for cmd in cmake cc make pkg-config; do
         command -v $cmd &>/dev/null || missing="$missing $cmd"
     done
-    # Check for libraries via pkg-config
     if command -v pkg-config &>/dev/null; then
         pkg-config --exists sqlite3 2>/dev/null || missing="$missing libsqlite3"
         pkg-config --exists libzmq 2>/dev/null || missing="$missing libzmq"
@@ -73,11 +72,19 @@ build_village() {
         echo "  Debian/Ubuntu: sudo apt install build-essential cmake pkg-config libsqlite3-dev libzmq3-dev"
         exit 1
     fi
-    echo "building..."
+}
+
+build_all() {
+    check_deps
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
     cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug
-    cmake --build . --target warren_village --target strata_human_cli -j4
+    cmake --build . -j4 "$@"
+}
+
+build_village() {
+    echo "building..."
+    build_all --target warren_village --target strata_human_cli
     echo "build complete."
 }
 
@@ -135,32 +142,14 @@ case "${1:-}" in
         ;;
     all)
         stop_village
-        if ! command -v cmake &>/dev/null; then
-            echo "ERROR: cmake not found. Install with: brew install cmake (macOS) or sudo apt install cmake (Debian/Ubuntu)"
-            exit 1
-        fi
         echo "building all targets..."
-        mkdir -p "$BUILD_DIR"
-        cd "$BUILD_DIR"
-        cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug
-        cmake --build . -j4
+        build_all
         echo "build complete."
         ;;
     test)
         stop_village
-        for cmd in cmake cc make; do
-            if ! command -v $cmd &>/dev/null; then
-                echo "ERROR: $cmd not found."
-                echo "  macOS:         brew install cmake"
-                echo "  Debian/Ubuntu: sudo apt install build-essential cmake"
-                exit 1
-            fi
-        done
         echo "building all targets..."
-        mkdir -p "$BUILD_DIR"
-        cd "$BUILD_DIR"
-        cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug
-        cmake --build . -j4
+        build_all
         echo "running tests..."
         ctest --output-on-failure
         ;;
