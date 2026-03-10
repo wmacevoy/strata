@@ -57,11 +57,15 @@ stop_village() {
 }
 
 build_village() {
+    if ! command -v cmake &>/dev/null; then
+        echo "ERROR: cmake not found. Install with: brew install cmake (macOS) or sudo apt install cmake (Debian/Ubuntu)"
+        exit 1
+    fi
     echo "building..."
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
-    cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug > /dev/null 2>&1
-    cmake --build . --target warren_village --target strata_human_cli -j4 2>&1 | tail -5
+    cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug
+    cmake --build . --target warren_village --target strata_human_cli -j4
     echo "build complete."
 }
 
@@ -119,11 +123,15 @@ case "${1:-}" in
         ;;
     all)
         stop_village
+        if ! command -v cmake &>/dev/null; then
+            echo "ERROR: cmake not found. Install with: brew install cmake (macOS) or sudo apt install cmake (Debian/Ubuntu)"
+            exit 1
+        fi
         echo "building all targets..."
         mkdir -p "$BUILD_DIR"
         cd "$BUILD_DIR"
-        cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug > /dev/null 2>&1
-        cmake --build . -j4 2>&1 | tail -10
+        cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug
+        cmake --build . -j4
         echo "build complete."
         ;;
     start)
