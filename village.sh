@@ -6,7 +6,8 @@
 #   ./village.sh          # teardown old, build, start village + human REPL
 #   ./village.sh stop     # just teardown
 #   ./village.sh start    # start without rebuild (must be built already)
-#   ./village.sh build    # just build
+#   ./village.sh build    # just build village + human CLI
+#   ./village.sh all      # stop, build all targets (including tests)
 #
 
 set -e
@@ -57,6 +58,7 @@ stop_village() {
 
 build_village() {
     echo "building..."
+    mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
     cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug > /dev/null 2>&1
     cmake --build . --target warren_village --target strata_human_cli -j4 2>&1 | tail -5
@@ -114,6 +116,15 @@ case "${1:-}" in
         ;;
     build)
         build_village
+        ;;
+    all)
+        stop_village
+        echo "building all targets..."
+        mkdir -p "$BUILD_DIR"
+        cd "$BUILD_DIR"
+        cmake "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Debug > /dev/null 2>&1
+        cmake --build . -j4 2>&1 | tail -10
+        echo "build complete."
         ;;
     start)
         start_village
