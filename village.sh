@@ -58,14 +58,21 @@ stop_village() {
 }
 
 build_village() {
-    for cmd in cmake cc make; do
-        if ! command -v $cmd &>/dev/null; then
-            echo "ERROR: $cmd not found."
-            echo "  macOS:         brew install cmake"
-            echo "  Debian/Ubuntu: sudo apt install build-essential cmake"
-            exit 1
-        fi
+    local missing=""
+    for cmd in cmake cc make pkg-config; do
+        command -v $cmd &>/dev/null || missing="$missing $cmd"
     done
+    # Check for libraries via pkg-config
+    if command -v pkg-config &>/dev/null; then
+        pkg-config --exists sqlite3 2>/dev/null || missing="$missing libsqlite3"
+        pkg-config --exists libzmq 2>/dev/null || missing="$missing libzmq"
+    fi
+    if [ -n "$missing" ]; then
+        echo "ERROR: missing dependencies:$missing"
+        echo "  macOS:         brew install cmake sqlite zeromq"
+        echo "  Debian/Ubuntu: sudo apt install build-essential cmake pkg-config libsqlite3-dev libzmq3-dev"
+        exit 1
+    fi
     echo "building..."
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
