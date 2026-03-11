@@ -3,7 +3,7 @@
  *
  * Startup:
  *   1. Init SQLite schema, create repos, assign roles
- *   2. Fork store_service, code-smith, messenger, cobbler (optional)
+ *   2. Fork store_service, code-smith, messenger, cobbler
  *   3. Register & spawn gee, inch, loom, claude JS dens
  *   4. Block until SIGTERM/SIGINT
  *   5. Cleanup: kill children, reap, delete PID file
@@ -21,9 +21,7 @@
 
 extern int store_service_run(const char *db_path, const char *endpoint);
 extern int code_smith_run(const char *endpoint, const char *root, int readonly);
-#ifdef HAVE_COBBLER
 extern int cobbler_run(const char *endpoint, const char *root, const char *clang);
-#endif
 extern int messenger_run(const char *endpoint, int timeout);
 
 #define DB_PATH       "/tmp/warren_village.db"
@@ -47,9 +45,7 @@ extern int messenger_run(const char *endpoint, int timeout);
 static volatile int running = 1;
 static pid_t store_pid = -1;
 static pid_t smith_pid = -1;
-#ifdef HAVE_COBBLER
 static pid_t cobbler_pid = -1;
-#endif
 static pid_t messenger_pid = -1;
 static pid_t claude_pid = -1;
 static pid_t gee_pid = -1;
@@ -72,9 +68,7 @@ static void cleanup(void) {
     kill_child(&loom_pid);
     if (host) { strata_den_host_free(host); host = NULL; }
     kill_child(&messenger_pid);
-#ifdef HAVE_COBBLER
     kill_child(&cobbler_pid);
-#endif
     kill_child(&smith_pid);
     kill_child(&store_pid);
     unlink(PID_FILE);
@@ -225,7 +219,6 @@ int main(void) {
     }
     fprintf(stderr, "village: code-smith ready\n");
 
-#ifdef HAVE_COBBLER
     /* Fork cobbler vocation */
     fflush(stdout);
     fflush(stderr);
@@ -244,7 +237,6 @@ int main(void) {
     } else {
         fprintf(stderr, "village: cobbler ready\n");
     }
-#endif
 
     /* Fork messenger vocation */
     fflush(stdout);
@@ -312,12 +304,7 @@ int main(void) {
             "{\"messenger_ep\":\"%s\",\"smith_ep\":\"%s\",\"cobbler_ep\":\"%s\","
             "\"model\":\"claude-sonnet-4-6\"}",
             MESSENGER_EP, SMITH_EP,
-#ifdef HAVE_COBBLER
-            cobbler_pid > 0 ? COBBLER_EP : ""
-#else
-            ""
-#endif
-        );
+            cobbler_pid > 0 ? COBBLER_EP : "");
 
         claude_pid = strata_den_spawn(host, "claude", claude_event, 2);
         if (claude_pid <= 0) {
@@ -336,10 +323,8 @@ int main(void) {
     fprintf(stderr, "\nvillage: ready\n");
     fprintf(stderr, "  store:      %s\n", STORE_EP);
     fprintf(stderr, "  code-smith: %s\n", SMITH_EP);
-#ifdef HAVE_COBBLER
     if (cobbler_pid > 0)
         fprintf(stderr, "  cobbler:    %s\n", COBBLER_EP);
-#endif
     if (messenger_pid > 0)
         fprintf(stderr, "  messenger:  %s\n", MESSENGER_EP);
     fprintf(stderr, "  gee:        REP=%s PUB=%s\n", GEE_REP, GEE_PUB);
@@ -358,9 +343,7 @@ int main(void) {
             fprintf(stderr, "village: child %d exited\n", died);
             if (died == store_pid) { store_pid = -1; running = 0; }
             if (died == smith_pid) smith_pid = -1;
-#ifdef HAVE_COBBLER
             if (died == cobbler_pid) cobbler_pid = -1;
-#endif
             if (died == messenger_pid) messenger_pid = -1;
             if (died == claude_pid) claude_pid = -1;
             if (died == gee_pid) gee_pid = -1;

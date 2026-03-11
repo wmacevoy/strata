@@ -14,7 +14,6 @@ if(APPLE)
     list(APPEND CMAKE_PREFIX_PATH
         "${HOMEBREW_PREFIX}/opt/sqlite"
         "${HOMEBREW_PREFIX}/opt/zeromq"
-        "${HOMEBREW_PREFIX}/opt/wasm-micro-runtime"
     )
 endif()
 
@@ -32,11 +31,13 @@ if(NOT ZMQ_INCLUDE_DIR OR NOT ZMQ_LIBRARY)
     message(FATAL_ERROR "ZeroMQ not found")
 endif()
 
-# WAMR
-find_path(WAMR_INCLUDE_DIR wasm_export.h)
-find_library(WAMR_LIBRARY iwasm)
-if(NOT WAMR_INCLUDE_DIR OR NOT WAMR_LIBRARY)
-    message(FATAL_ERROR "WAMR (wasm-micro-runtime) not found")
+# TCC (vendored — in-memory C compiler for native dens)
+add_library(tcc vendor/tcc/libtcc.c)
+target_include_directories(tcc PUBLIC vendor/tcc)
+target_compile_definitions(tcc PRIVATE ONE_SOURCE=1)
+target_compile_options(tcc PRIVATE -w)
+if(NOT APPLE)
+    target_link_libraries(tcc dl)
 endif()
 
 # libcurl (vendored — HTTP/HTTPS only, static)
@@ -96,6 +97,7 @@ add_library(strata
     src/context.c
     src/change.c
     src/den.c
+    src/sandbox.c
     src/blob.c
     src/village.c
 )
@@ -103,11 +105,11 @@ target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN)
 target_include_directories(strata PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/vendor/quickjs
+    ${CMAKE_SOURCE_DIR}/vendor/tcc
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
-    ${WAMR_INCLUDE_DIR}
 )
-target_link_libraries(strata quickjs ${SQLITE3_LIBRARY} ${ZMQ_LIBRARY} ${WAMR_LIBRARY})
+target_link_libraries(strata quickjs tcc ${SQLITE3_LIBRARY} ${ZMQ_LIBRARY})
 if(NOT APPLE)
     target_link_libraries(strata OpenSSL::Crypto)
 endif()
@@ -179,41 +181,22 @@ target_include_directories(code_smith PRIVATE
 )
 target_link_libraries(code_smith ${ZMQ_LIBRARY})
 
-# Cobbler vocation (optional — requires clang with WASM target)
-find_program(WASM_CLANG clang PATHS /opt/homebrew/opt/llvm/bin NO_DEFAULT_PATH)
-if(NOT WASM_CLANG)
-    find_program(WASM_CLANG clang)
-endif()
-if(WASM_CLANG)
-    # Test compile + link (needs wasm-ld linker, not just clang -c)
-    file(WRITE ${CMAKE_BINARY_DIR}/_wasm_test.c "void _start(void){}")
-    execute_process(COMMAND ${WASM_CLANG} --target=wasm32 -nostdlib
-                    ${CMAKE_BINARY_DIR}/_wasm_test.c -o ${CMAKE_BINARY_DIR}/_wasm_test.wasm
-                    RESULT_VARIABLE WASM_CLANG_RC ERROR_QUIET)
-    file(REMOVE ${CMAKE_BINARY_DIR}/_wasm_test.c ${CMAKE_BINARY_DIR}/_wasm_test.wasm)
-    if(NOT WASM_CLANG_RC EQUAL 0)
-        set(WASM_CLANG "")
-    endif()
-endif()
+# Cobbler vocation (C source validator via vendored TCC)
+add_library(cobbler_lib OBJECT src/cobbler.c)
+target_include_directories(cobbler_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/vendor/tcc
+    ${ZMQ_INCLUDE_DIR}
+)
+target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN)
 
-if(WASM_CLANG)
-    message(STATUS "Cobbler enabled: ${WASM_CLANG}")
-    add_library(cobbler_lib OBJECT src/cobbler.c)
-    target_include_directories(cobbler_lib PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${ZMQ_INCLUDE_DIR}
-    )
-    target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN)
-
-    add_executable(cobbler src/cobbler.c)
-    target_include_directories(cobbler PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${ZMQ_INCLUDE_DIR}
-    )
-    target_link_libraries(cobbler ${ZMQ_LIBRARY})
-else()
-    message(STATUS "Cobbler disabled: no clang with WASM support found")
-endif()
+add_executable(cobbler src/cobbler.c)
+target_include_directories(cobbler PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/vendor/tcc
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(cobbler ${ZMQ_LIBRARY} tcc)
 
 # Messenger vocation (HTTP client via vendored libcurl)
 add_library(messenger_lib OBJECT src/messenger.c)
@@ -257,28 +240,23 @@ target_link_libraries(strata_human_cli strata)
 set_target_properties(strata_human_cli PROPERTIES OUTPUT_NAME "strata-human")
 
 # Warren's Village
-set(WARREN_OBJECTS $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:messenger_lib>)
-set(WARREN_DEFS "")
-if(WASM_CLANG)
-    list(APPEND WARREN_OBJECTS $<TARGET_OBJECTS:cobbler_lib>)
-    list(APPEND WARREN_DEFS HAVE_COBBLER)
-endif()
-add_executable(warren_village src/warren_village.c ${WARREN_OBJECTS})
-if(WARREN_DEFS)
-    target_compile_definitions(warren_village PRIVATE ${WARREN_DEFS})
-endif()
-target_link_libraries(warren_village strata libcurl_static)
+add_executable(warren_village src/warren_village.c
+    $<TARGET_OBJECTS:store_service_lib>
+    $<TARGET_OBJECTS:code_smith_lib>
+    $<TARGET_OBJECTS:messenger_lib>
+    $<TARGET_OBJECTS:cobbler_lib>
+)
+target_link_libraries(warren_village strata libcurl_static tcc)
 
-# Cobbler test (conditional)
-if(WASM_CLANG)
-    add_executable(test_cobbler test/test_cobbler.c $<TARGET_OBJECTS:cobbler_lib>)
-    target_include_directories(test_cobbler PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${ZMQ_INCLUDE_DIR}
-    )
-    target_link_libraries(test_cobbler ${ZMQ_LIBRARY})
-    add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-endif()
+# Cobbler test
+add_executable(test_cobbler test/test_cobbler.c $<TARGET_OBJECTS:cobbler_lib>)
+target_include_directories(test_cobbler PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/vendor/tcc
+    ${ZMQ_INCLUDE_DIR}
+)
+target_link_libraries(test_cobbler ${ZMQ_LIBRARY} tcc)
+add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # Messenger test
 add_executable(test_messenger test/test_messenger.c $<TARGET_OBJECTS:messenger_lib>)

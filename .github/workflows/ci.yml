@@ -29,40 +29,14 @@ jobs:
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install sqlite zeromq wasm-micro-runtime llvm wabt
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+          brew install sqlite zeromq
 
       # --- Linux dependencies ---
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev libzmq3-dev libssl-dev clang lld wabt
-
-      - name: Cache WAMR (Linux)
-        if: runner.os == 'Linux'
-        uses: actions/cache@v4
-        with:
-          path: /tmp/wamr-install
-          key: wamr-2.1.0-${{ runner.os }}
-
-      - name: Build and install WAMR (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          if [ ! -f /tmp/wamr-install/lib/libiwasm.so ]; then
-            git clone --depth 1 --branch WAMR-2.1.0 \
-              https://github.com/bytecodealliance/wasm-micro-runtime.git /tmp/wamr-src
-            cmake -B /tmp/wamr-build -S /tmp/wamr-src/product-mini/platforms/linux \
-              -DWAMR_BUILD_INTERP=1 -DWAMR_BUILD_AOT=0 -DWAMR_BUILD_LIBC_BUILTIN=1 \
-              -DCMAKE_INSTALL_PREFIX=/tmp/wamr-install
-            cmake --build /tmp/wamr-build -j$(nproc)
-            cmake --install /tmp/wamr-build
-            mkdir -p /tmp/wamr-install/include
-            cp /tmp/wamr-src/core/iwasm/include/*.h /tmp/wamr-install/include/
-          fi
-          sudo cp /tmp/wamr-install/lib/* /usr/local/lib/
-          sudo cp /tmp/wamr-install/include/* /usr/local/include/
-          sudo ldconfig
+          sudo apt-get install -y libsqlite3-dev libzmq3-dev libssl-dev
 
       # --- Build and test ---
       - name: Configure

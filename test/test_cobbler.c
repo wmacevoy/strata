@@ -1,9 +1,9 @@
 /*
- * Integration test for the cobbler vocation (C → WASM compiler).
+ * Integration test for the cobbler vocation (C source validator via TCC).
  *
  * 1. Start cobbler on a test port
  * 2. Test init, discover, compile (success + failure)
- * 3. Verify WASM output is valid (starts with \0asm magic)
+ * 3. Verify TCC validates source and detects entry points
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,38 +66,6 @@ static int wait_for_service(const char *endpoint, int max_retries) {
     return ready;
 }
 
-/* Base64 decode for verification */
-static int b64_val(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1;
-}
-
-static unsigned char *base64_decode(const char *str, size_t len, size_t *out_len) {
-    size_t olen = len / 4 * 3;
-    if (len > 0 && str[len-1] == '=') olen--;
-    if (len > 1 && str[len-2] == '=') olen--;
-    unsigned char *out = malloc(olen);
-    if (!out) return NULL;
-    size_t i, j;
-    for (i = 0, j = 0; i + 3 < len; i += 4) {
-        int a = b64_val(str[i]), b = b64_val(str[i+1]);
-        int c = b64_val(str[i+2]), d = b64_val(str[i+3]);
-        if (a < 0 || b < 0) break;
-        unsigned int v = (unsigned int)((a << 18) | (b << 12));
-        if (c >= 0) v |= (unsigned int)(c << 6);
-        if (d >= 0) v |= (unsigned int)d;
-        out[j++] = (v >> 16) & 0xFF;
-        if (c >= 0 && j < olen) out[j++] = (v >> 8) & 0xFF;
-        if (d >= 0 && j < olen) out[j++] = v & 0xFF;
-    }
-    *out_len = j;
-    return out;
-}
-
 int main(void) {
     signal(SIGABRT, abort_handler);
     signal(SIGTERM, abort_handler);
@@ -125,7 +93,7 @@ int main(void) {
     /* Set up ZMQ client */
     zmq_ctx = zmq_ctx_new();
     client = zmq_socket(zmq_ctx, ZMQ_REQ);
-    int timeout = 10000; /* 10s for compilation */
+    int timeout = 10000;
     zmq_setsockopt(client, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
     zmq_connect(client, COBBLER_EP);
     usleep(100000);
@@ -154,49 +122,27 @@ int main(void) {
         assert(strstr(resp, "\"ok\":true") != NULL);
         assert(strstr(resp, "\"compile\"") != NULL);
         assert(strstr(resp, "\"compile_file\"") != NULL);
-        assert(strstr(resp, "\"clang_version\"") != NULL);
+        assert(strstr(resp, "\"compiler\":\"tcc\"") != NULL);
     }
     PASS();
 
-    /* Test compile — minimal valid WASM */
-    TEST("compile valid C to WASM");
+    /* Test compile — valid C with entry points */
+    TEST("compile valid C source");
     {
         const char *req =
             "{\"action\":\"compile\",\"source\":"
-            "\"__attribute__((export_name(\\\"add\\\"))) "
-            "int add(int a, int b) { return a + b; }\"}";
+            "\"int add(int a, int b) { return a + b; }\\n"
+            "void on_event(const char *e, int l) { (void)e; (void)l; }\"}";
         zmq_send(client, req, strlen(req), 0);
-        char *resp = malloc(1024 * 1024);
-        assert(resp);
-        int rc = zmq_recv(client, resp, 1024 * 1024 - 1, 0);
+        char resp[8192] = {0};
+        int rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
         assert(rc > 0);
-        resp[rc] = '\0';
         if (!strstr(resp, "\"ok\":true")) {
             fprintf(stderr, "\ncompile response: %s\n", resp);
         }
         assert(strstr(resp, "\"ok\":true") != NULL);
-        assert(strstr(resp, "\"wasm\":\"") != NULL);
-        assert(strstr(resp, "\"size\":") != NULL);
-
-        /* Extract and verify WASM magic bytes */
-        const char *wasm_start = strstr(resp, "\"wasm\":\"");
-        assert(wasm_start);
-        wasm_start += 8; /* skip "wasm":" */
-        const char *wasm_end = strchr(wasm_start, '"');
-        assert(wasm_end);
-        size_t b64_len = (size_t)(wasm_end - wasm_start);
-
-        size_t decoded_len = 0;
-        unsigned char *decoded = base64_decode(wasm_start, b64_len, &decoded_len);
-        assert(decoded);
-        assert(decoded_len >= 4);
-        /* WASM magic: \0asm */
-        assert(decoded[0] == 0x00);
-        assert(decoded[1] == 0x61); /* 'a' */
-        assert(decoded[2] == 0x73); /* 's' */
-        assert(decoded[3] == 0x6d); /* 'm' */
-        free(decoded);
-        free(resp);
+        assert(strstr(resp, "\"valid\":true") != NULL);
+        assert(strstr(resp, "\"has_on_event\":true") != NULL);
     }
     PASS();
 

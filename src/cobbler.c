@@ -1,5 +1,5 @@
 /*
- * cobbler — a vocation den that compiles C source to WASM binaries.
+ * cobbler — a vocation den that validates and compiles C source using TCC.
  *
  * JSON-over-ZMQ-REP service. Same pattern as code-smith.
  *
@@ -7,7 +7,6 @@
  *
  * Usage:
  *   cobbler --endpoint tcp://127.0.0.1:5591 --root /path/to/project
- *   cobbler --endpoint tcp://127.0.0.1:5591 --root . --clang /opt/homebrew/opt/llvm/bin/clang
  */
 
 #include <stdio.h>
@@ -18,54 +17,19 @@
 #include <unistd.h>
 #include <limits.h>
 #include <zmq.h>
+#include <libtcc.h>
 
 #include "strata/json_util.h"
 
 #define MAX_SOURCE_SIZE  (1 * 1024 * 1024)   /* 1MB source cap */
-#define MAX_WASM_OUTPUT  (4 * 1024 * 1024)   /* 4MB wasm output cap */
-#define RESP_CAP         (8 * 1024 * 1024)   /* 8MB response (base64 expands) */
-#define MAX_EXPORTS      32
+#define RESP_CAP         (2 * 1024 * 1024)   /* 2MB response cap */
 
 static volatile int running = 1;
 static char root_path[PATH_MAX] = ".";
-static char clang_path[PATH_MAX] = "";
 
 static void sigint_handler(int sig) {
     (void)sig;
     running = 0;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Base64 encoding                                                     */
-/* ------------------------------------------------------------------ */
-
-static const char b64_table[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static char *base64_encode(const unsigned char *data, size_t len, size_t *out_len) {
-    size_t olen = 4 * ((len + 2) / 3);
-    char *out = malloc(olen + 1);
-    if (!out) return NULL;
-    size_t i, j;
-    for (i = 0, j = 0; i + 2 < len; i += 3, j += 4) {
-        unsigned int v = ((unsigned int)data[i] << 16) | (data[i+1] << 8) | data[i+2];
-        out[j]   = b64_table[(v >> 18) & 0x3F];
-        out[j+1] = b64_table[(v >> 12) & 0x3F];
-        out[j+2] = b64_table[(v >> 6)  & 0x3F];
-        out[j+3] = b64_table[v & 0x3F];
-    }
-    if (i < len) {
-        unsigned int v = (unsigned int)data[i] << 16;
-        if (i + 1 < len) v |= data[i+1] << 8;
-        out[j]   = b64_table[(v >> 18) & 0x3F];
-        out[j+1] = b64_table[(v >> 12) & 0x3F];
-        out[j+2] = (i + 1 < len) ? b64_table[(v >> 6) & 0x3F] : '=';
-        out[j+3] = '=';
-        j += 4;
-    }
-    out[j] = '\0';
-    if (out_len) *out_len = j;
-    return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -86,7 +50,6 @@ static int safe_path(const char *user_path, char *out, size_t out_cap) {
 
     char resolved[PATH_MAX];
     if (!realpath(combined, resolved)) {
-        /* File might not exist yet (for write). Resolve parent. */
         char *slash = strrchr(combined, '/');
         if (slash) {
             char parent[PATH_MAX];
@@ -95,7 +58,6 @@ static int safe_path(const char *user_path, char *out, size_t out_cap) {
             memcpy(parent, combined, plen);
             parent[plen] = '\0';
             if (!realpath(parent, resolved)) return -1;
-            /* Append filename */
             size_t rlen = strlen(resolved);
             snprintf(resolved + rlen, sizeof(resolved) - rlen, "%s", slash);
         } else {
@@ -103,11 +65,9 @@ static int safe_path(const char *user_path, char *out, size_t out_cap) {
         }
     }
 
-    /* Must start with root_path */
     size_t rlen = strlen(root_path);
     if (strncmp(resolved, root_path, rlen) != 0)
         return -1;
-    /* Next char must be '/' or '\0' */
     if (resolved[rlen] != '\0' && resolved[rlen] != '/')
         return -1;
 
@@ -116,177 +76,85 @@ static int safe_path(const char *user_path, char *out, size_t out_cap) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Clang detection                                                     */
+/*  TCC error collection                                                */
 /* ------------------------------------------------------------------ */
 
-static int find_clang(void) {
-    /* 1. Already set via --clang */
-    if (clang_path[0]) {
-        if (access(clang_path, X_OK) == 0)
-            return 0;
-        fprintf(stderr, "cobbler: specified clang not found: %s\n", clang_path);
-        return -1;
-    }
+typedef struct {
+    char buf[4096];
+    int pos;
+} tcc_err_ctx_t;
 
-    /* 2. Homebrew LLVM */
-    const char *brew = "/opt/homebrew/opt/llvm/bin/clang";
-    if (access(brew, X_OK) == 0) {
-        snprintf(clang_path, sizeof(clang_path), "%s", brew);
-        return 0;
+static void tcc_error_handler(void *opaque, const char *msg) {
+    tcc_err_ctx_t *ctx = opaque;
+    if (!ctx || !msg) return;
+    int remaining = (int)sizeof(ctx->buf) - ctx->pos - 1;
+    if (remaining <= 0) return;
+    if (ctx->pos > 0) {
+        ctx->buf[ctx->pos++] = '\n';
+        remaining--;
     }
-
-    /* 3. System PATH — find full path */
-    FILE *p = popen("which clang 2>/dev/null", "r");
-    if (p) {
-        if (fgets(clang_path, sizeof(clang_path), p)) {
-            /* Strip trailing newline */
-            size_t len = strlen(clang_path);
-            if (len > 0 && clang_path[len - 1] == '\n')
-                clang_path[len - 1] = '\0';
-        }
-        pclose(p);
-        if (clang_path[0] && access(clang_path, X_OK) == 0)
-            return 0;
-    }
-
-    fprintf(stderr, "cobbler: clang not found\n");
-    return -1;
-}
-
-static int verify_wasm_target(void) {
-    char cmd[PATH_MAX + 64];
-    snprintf(cmd, sizeof(cmd),
-        "%s --target=wasm32 -x c -c -o /dev/null /dev/null 2>/dev/null",
-        clang_path);
-    int rc = system(cmd);
-    if (rc != 0) {
-        fprintf(stderr, "cobbler: clang at %s does not support --target=wasm32\n", clang_path);
-        return -1;
-    }
-    return 0;
-}
-
-static void get_clang_version(char *out, size_t out_cap) {
-    char cmd[PATH_MAX + 32];
-    snprintf(cmd, sizeof(cmd), "%s --version 2>/dev/null | head -1", clang_path);
-    FILE *p = popen(cmd, "r");
-    if (p) {
-        if (fgets(out, (int)out_cap, p)) {
-            size_t len = strlen(out);
-            if (len > 0 && out[len - 1] == '\n')
-                out[len - 1] = '\0';
-        }
-        pclose(p);
-    }
-    if (!out[0])
-        snprintf(out, out_cap, "unknown");
+    int n = snprintf(ctx->buf + ctx->pos, remaining, "%s", msg);
+    if (n > 0) ctx->pos += (n < remaining ? n : remaining);
 }
 
 /* ------------------------------------------------------------------ */
-/*  Compile helpers                                                     */
+/*  Symbol scanning for entry point detection                           */
 /* ------------------------------------------------------------------ */
 
-static void do_compile(const char *src_path, const char *exports[], int nexports,
-                       char *resp, int resp_cap) {
-    /* Build output path from source path */
-    char wasm_path[PATH_MAX];
-    snprintf(wasm_path, sizeof(wasm_path), "%s", src_path);
-    size_t slen = strlen(wasm_path);
-    if (slen > 2 && wasm_path[slen - 2] == '.' && wasm_path[slen - 1] == 'c') {
-        wasm_path[slen - 2] = '\0';
-        strcat(wasm_path, ".wasm");
-    } else {
-        strcat(wasm_path, ".wasm");
-    }
+typedef struct {
+    int has_serve;
+    int has_on_event;
+} sym_scan_t;
 
-    /* Build clang command */
-    char cmd[PATH_MAX * 2 + 4096];
-    int pos = snprintf(cmd, sizeof(cmd),
-        "%s --target=wasm32 -nostdlib -O2 "
-        "-Wl,--no-entry -Wl,--export-all",
-        clang_path);
+static void sym_scan_cb(void *ctx, const char *name, const void *val) {
+    (void)val;
+    sym_scan_t *scan = ctx;
+    /* macOS prefixes symbols with underscore */
+    if (name[0] == '_') name++;
+    if (strcmp(name, "serve") == 0) scan->has_serve = 1;
+    if (strcmp(name, "on_event") == 0) scan->has_on_event = 1;
+}
 
-    for (int i = 0; i < nexports && pos < (int)sizeof(cmd) - 128; i++) {
-        pos += snprintf(cmd + pos, sizeof(cmd) - pos,
-            " -Wl,--export=%s", exports[i]);
-    }
+/* ------------------------------------------------------------------ */
+/*  Compile using TCC in-memory                                         */
+/* ------------------------------------------------------------------ */
 
-    pos += snprintf(cmd + pos, sizeof(cmd) - pos,
-        " -o %s %s 2>&1", wasm_path, src_path);
+static void do_compile_source(const char *source, int source_len,
+                              char *resp, int resp_cap) {
+    tcc_err_ctx_t err_ctx;
+    memset(&err_ctx, 0, sizeof(err_ctx));
 
-    /* Run compiler */
-    FILE *p = popen(cmd, "r");
-    if (!p) {
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"popen failed\"}");
+    TCCState *s = tcc_new();
+    if (!s) {
+        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"tcc_new failed\"}");
         return;
     }
 
-    char output[8192] = {0};
-    size_t total = 0;
-    while (total < sizeof(output) - 1) {
-        size_t n = fread(output + total, 1, sizeof(output) - 1 - total, p);
-        if (n == 0) break;
-        total += n;
-    }
-    output[total] = '\0';
-    int exit_code = pclose(p);
-    exit_code = WEXITSTATUS(exit_code);
+    tcc_set_lib_path(s, "vendor/tcc");
+    tcc_set_output_type(s, TCC_OUTPUT_OBJ);
+    tcc_set_error_func(s, &err_ctx, tcc_error_handler);
+    tcc_set_options(s, "-nostdlib");
 
-    if (exit_code != 0) {
-        /* Compilation failed — return error */
-        char esc_output[16384];
-        json_escape(output, (int)total, esc_output, sizeof(esc_output));
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"%s\"}", esc_output);
-        unlink(wasm_path);
+    int rc = tcc_compile_string(s, source);
+    if (rc == -1) {
+        char esc_err[8192];
+        json_escape(err_ctx.buf, err_ctx.pos, esc_err, sizeof(esc_err));
+        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"%s\"}", esc_err);
+        tcc_delete(s);
         return;
     }
 
-    /* Read the .wasm output */
-    FILE *wf = fopen(wasm_path, "rb");
-    if (!wf) {
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"cannot read wasm output\"}");
-        unlink(wasm_path);
-        return;
-    }
+    /* Scan symbols for entry points */
+    sym_scan_t scan = {0, 0};
+    tcc_list_symbols(s, &scan, sym_scan_cb);
+    tcc_delete(s);
 
-    fseek(wf, 0, SEEK_END);
-    long wasm_size = ftell(wf);
-    fseek(wf, 0, SEEK_SET);
-
-    if (wasm_size > MAX_WASM_OUTPUT) {
-        fclose(wf);
-        unlink(wasm_path);
-        snprintf(resp, resp_cap,
-            "{\"ok\":false,\"error\":\"wasm output too large (%ld bytes)\"}", wasm_size);
-        return;
-    }
-
-    unsigned char *wasm_data = malloc(wasm_size);
-    if (!wasm_data) {
-        fclose(wf);
-        unlink(wasm_path);
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"oom\"}");
-        return;
-    }
-
-    size_t nr = fread(wasm_data, 1, wasm_size, wf);
-    fclose(wf);
-    unlink(wasm_path);
-
-    /* Base64 encode */
-    size_t b64_len = 0;
-    char *b64 = base64_encode(wasm_data, nr, &b64_len);
-    free(wasm_data);
-
-    if (!b64) {
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"base64 encode failed\"}");
-        return;
-    }
-
-    /* Build response */
     snprintf(resp, resp_cap,
-        "{\"ok\":true,\"wasm\":\"%s\",\"size\":%ld}", b64, (long)nr);
-    free(b64);
+        "{\"ok\":true,\"valid\":true,\"size\":%d,"
+        "\"has_serve\":%s,\"has_on_event\":%s}",
+        source_len,
+        scan.has_serve ? "true" : "false",
+        scan.has_on_event ? "true" : "false");
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,22 +162,16 @@ static void do_compile(const char *src_path, const char *exports[], int nexports
 /* ------------------------------------------------------------------ */
 
 static void handle_discover(char *resp, int resp_cap) {
-    char version[256] = {0};
-    get_clang_version(version, sizeof(version));
-    char esc_version[512];
-    json_escape(version, (int)strlen(version), esc_version, sizeof(esc_version));
-
     snprintf(resp, resp_cap,
         "{\"ok\":true,\"name\":\"cobbler\",\"actions\":{"
         "\"discover\":{\"params\":{}},"
-        "\"compile\":{\"params\":{\"source\":\"string\",\"exports\":\"string[] (optional)\"}},"
-        "\"compile_file\":{\"params\":{\"path\":\"string\",\"exports\":\"string[] (optional)\"}}"
-        "},\"clang\":\"%s\",\"clang_version\":\"%s\",\"root\":\"%s\"}",
-        clang_path, esc_version, root_path);
+        "\"compile\":{\"params\":{\"source\":\"string\"}},"
+        "\"compile_file\":{\"params\":{\"path\":\"string\"}}"
+        "},\"compiler\":\"tcc\",\"root\":\"%s\"}",
+        root_path);
 }
 
 static void handle_compile(const char *req, char *resp, int resp_cap) {
-    /* Extract source */
     char *source = malloc(MAX_SOURCE_SIZE + 1);
     if (!source) {
         snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"oom\"}");
@@ -322,46 +184,8 @@ static void handle_compile(const char *req, char *resp, int resp_cap) {
         return;
     }
 
-    /* Extract optional exports array */
-    char *exports[MAX_EXPORTS];
-    int nexports = json_get_string_array(req, "exports", exports, MAX_EXPORTS);
-
-    /* Write source to temp file */
-    char tmp_src[PATH_MAX];
-    snprintf(tmp_src, sizeof(tmp_src), "/tmp/cobbler_XXXXXX.c");
-    /* mkstemp needs the template without .c, so use a different approach */
-    char tmp_base[PATH_MAX];
-    snprintf(tmp_base, sizeof(tmp_base), "/tmp/cobbler_XXXXXX");
-    int fd = mkstemp(tmp_base);
-    if (fd < 0) {
-        free(source);
-        for (int i = 0; i < nexports; i++) free(exports[i]);
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"mkstemp failed\"}");
-        return;
-    }
-    close(fd);
-
-    /* Rename to .c */
-    snprintf(tmp_src, sizeof(tmp_src), "%s.c", tmp_base);
-    rename(tmp_base, tmp_src);
-
-    FILE *f = fopen(tmp_src, "w");
-    if (!f) {
-        unlink(tmp_src);
-        free(source);
-        for (int i = 0; i < nexports; i++) free(exports[i]);
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"cannot write temp file\"}");
-        return;
-    }
-    fwrite(source, 1, slen, f);
-    fclose(f);
+    do_compile_source(source, slen, resp, resp_cap);
     free(source);
-
-    do_compile(tmp_src, (const char **)exports, nexports, resp, resp_cap);
-
-    /* Clean up */
-    unlink(tmp_src);
-    for (int i = 0; i < nexports; i++) free(exports[i]);
 }
 
 static void handle_compile_file(const char *req, char *resp, int resp_cap) {
@@ -378,60 +202,36 @@ static void handle_compile_file(const char *req, char *resp, int resp_cap) {
         return;
     }
 
-    /* Verify file exists */
     if (access(safe, R_OK) != 0) {
         snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"cannot read file\"}");
         return;
     }
 
-    /* Check file size */
     struct stat st;
     if (stat(safe, &st) != 0 || st.st_size > MAX_SOURCE_SIZE) {
         snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"file too large\"}");
         return;
     }
 
-    /* Extract optional exports array */
-    char *exports[MAX_EXPORTS];
-    int nexports = json_get_string_array(req, "exports", exports, MAX_EXPORTS);
-
-    /* Copy to temp file so output goes to /tmp */
-    char tmp_base[PATH_MAX];
-    snprintf(tmp_base, sizeof(tmp_base), "/tmp/cobbler_XXXXXX");
-    int fd = mkstemp(tmp_base);
-    if (fd < 0) {
-        for (int i = 0; i < nexports; i++) free(exports[i]);
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"mkstemp failed\"}");
+    FILE *f = fopen(safe, "r");
+    if (!f) {
+        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"cannot open file\"}");
         return;
     }
-    close(fd);
 
-    char tmp_src[PATH_MAX];
-    snprintf(tmp_src, sizeof(tmp_src), "%s.c", tmp_base);
-    rename(tmp_base, tmp_src);
-
-    /* Copy source file to temp */
-    FILE *sf = fopen(safe, "r");
-    FILE *tf = fopen(tmp_src, "w");
-    if (!sf || !tf) {
-        if (sf) fclose(sf);
-        if (tf) fclose(tf);
-        unlink(tmp_src);
-        for (int i = 0; i < nexports; i++) free(exports[i]);
-        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"cannot copy source\"}");
+    char *source = malloc(st.st_size + 1);
+    if (!source) {
+        fclose(f);
+        snprintf(resp, resp_cap, "{\"ok\":false,\"error\":\"oom\"}");
         return;
     }
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), sf)) > 0)
-        fwrite(buf, 1, n, tf);
-    fclose(sf);
-    fclose(tf);
 
-    do_compile(tmp_src, (const char **)exports, nexports, resp, resp_cap);
+    size_t nr = fread(source, 1, st.st_size, f);
+    fclose(f);
+    source[nr] = '\0';
 
-    unlink(tmp_src);
-    for (int i = 0; i < nexports; i++) free(exports[i]);
+    do_compile_source(source, (int)nr, resp, resp_cap);
+    free(source);
 }
 
 /* ------------------------------------------------------------------ */
@@ -447,16 +247,13 @@ static void handle_request(const char *req, int req_len,
     if (strcmp(action, "init") == 0) {
         snprintf(resp, resp_cap, "{\"ok\":true,\"name\":\"cobbler\"}");
     } else if (strcmp(action, "say") == 0) {
-        /* Unwrap talk command: {"action":"say","message":"{...}"} */
         char msg[8192] = {0};
         json_get_string(req, "message", msg, sizeof(msg));
         if (msg[0] == '{') {
-            /* Message is JSON — dispatch it */
             handle_request(msg, (int)strlen(msg), resp, resp_cap);
         } else if (msg[0]) {
-            /* Plain text — show help */
             snprintf(resp, resp_cap,
-                "{\"ok\":true,\"message\":\"cobbler compiles C to WASM. "
+                "{\"ok\":true,\"message\":\"cobbler validates C source using TCC. "
                 "Send {\\\"action\\\":\\\"compile\\\",\\\"source\\\":\\\"...\\\"}  "
                 "or {\\\"action\\\":\\\"discover\\\"} for details.\"}");
         } else {
@@ -477,24 +274,16 @@ static void handle_request(const char *req, int req_len,
 /* ------------------------------------------------------------------ */
 
 int cobbler_run(const char *endpoint, const char *root, const char *clang) {
+    (void)clang; /* no longer used — kept for API compat */
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigint_handler);
 
-    /* Resolve root to absolute path */
     if (!realpath(root, root_path)) {
         fprintf(stderr, "cobbler: cannot resolve root '%s'\n", root);
         return 1;
     }
 
-    /* Set clang path if provided */
-    if (clang && clang[0])
-        snprintf(clang_path, sizeof(clang_path), "%s", clang);
-
-    /* Find and verify clang */
-    if (find_clang() != 0) return 1;
-    if (verify_wasm_target() != 0) return 1;
-
-    fprintf(stderr, "cobbler: using clang at %s\n", clang_path);
+    fprintf(stderr, "cobbler: using vendored TCC compiler\n");
 
     void *zmq_ctx = zmq_ctx_new();
     void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
@@ -540,21 +329,18 @@ int cobbler_run(const char *endpoint, const char *root, const char *clang) {
 int main(int argc, char **argv) {
     const char *endpoint = "tcp://127.0.0.1:5591";
     const char *root = ".";
-    const char *clang = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--endpoint") == 0 && i + 1 < argc)
             endpoint = argv[++i];
         else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc)
             root = argv[++i];
-        else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
-            clang = argv[++i];
         else {
-            fprintf(stderr, "usage: cobbler [--endpoint EP] [--root PATH] [--clang PATH]\n");
+            fprintf(stderr, "usage: cobbler [--endpoint EP] [--root PATH]\n");
             return 1;
         }
     }
 
-    return cobbler_run(endpoint, root, clang);
+    return cobbler_run(endpoint, root, NULL);
 }
 #endif

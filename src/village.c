@@ -159,16 +159,16 @@ int strata_remote_clone(strata_den_host *host, const char *den_name,
         "\"mode\":\"%s\","
         "\"origin_req\":\"%s\"}",
         def->name,
-        def->mode == STRATA_MODE_JS ? "js" : "wasm",
+        def->mode == STRATA_MODE_JS ? "js" : "native",
         origin_req_endpoint ? origin_req_endpoint : "");
 
     zmq_send(req, header, strlen(header), ZMQ_SNDMORE);
 
-    /* Frame 1: den binary */
+    /* Frame 1: den source (text) */
     if (def->mode == STRATA_MODE_JS) {
         zmq_send(req, def->js_source, strlen(def->js_source), ZMQ_SNDMORE);
     } else {
-        zmq_send(req, def->wasm_buf, def->wasm_len, ZMQ_SNDMORE);
+        zmq_send(req, def->c_source, def->c_source_len, ZMQ_SNDMORE);
     }
 
     /* Frame 2: event JSON */
@@ -292,8 +292,13 @@ static int handle_clone_request(void *rep_sock) {
                                            NULL, relay_rep, den_pub, den_rep);
         free(js);
     } else {
-        rc = strata_den_register_wasm_buf(host, den_name,
-                                             payload, plen, NULL, relay_rep);
+        /* Null-terminate C source */
+        char *csrc = malloc(plen + 1);
+        memcpy(csrc, payload, plen);
+        csrc[plen] = '\0';
+        rc = strata_den_register_native_buf(host, den_name,
+                                               csrc, plen, NULL, relay_rep);
+        free(csrc);
     }
     free(payload);
 

@@ -13,12 +13,12 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | context.c | Entity context: stores entity_id, resolves roles for a repo |
 | blob.c | Content-addressed blob storage with tagging + role-based permissions |
 | change.c | ZMQ PUB wrapper for artifact change notifications |
-| den.c | Den host: registers WASM/JS dens, spawns via fork, runs WAMR or QuickJS, manages bedrock ZMQ, per-den local SQLite, peer socket cache for den-to-den requests |
+| den.c | Den host: registers native C/JS dens, spawns via fork, runs TCC or QuickJS, manages bedrock ZMQ, per-den local SQLite, peer socket cache for den-to-den requests |
 | code_smith.c | Vocation den: file I/O + shell tools via ZMQ REP (read, write, exec, glob, grep, ls, discover) |
-| cobbler.c | Vocation den: C→WASM compiler via clang, ZMQ REP (compile, compile_file, discover). Optional build. |
+| cobbler.c | Vocation den: C source validator via vendored TCC, ZMQ REP (compile, compile_file, discover) |
 | messenger.c | Vocation den: HTTP client via vendored libcurl, ZMQ REP (fetch, discover) |
 | village.c | Village daemon: remote clone, relay (REQ/REP + SUB/PUB forwarding), migration |
-| warren_village.c | Warren's Village launcher: forks store + code-smith + messenger + cobbler (optional) + agent dens (gee, inch, loom, claude), manages lifecycle |
+| warren_village.c | Warren's Village launcher: forks store + code-smith + messenger + cobbler + agent dens (gee, inch, loom, claude), manages lifecycle |
 
 ### CLI Tools (src/)
 | File | Binary | Purpose |
@@ -33,7 +33,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | File | Key Types |
 |------|-----------|
 | store.h | `strata_store`, `strata_artifact`, artifact/blob/role/entity CRUD |
-| den.h | `strata_den_def`, `strata_den_host`, WASM/JS modes, spawn/register |
+| den.h | `strata_den_def`, `strata_den_host`, native C/JS modes, spawn/register |
 | schema.h | SQL DDL: repos, entities, artifacts, artifact_roles, role_assignments |
 | context.h | `strata_ctx`, role resolution per entity+repo |
 | village.h | clone, remote_clone, relay, village_run |
@@ -49,9 +49,9 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | loom.js | The synthesizer: tracks word threads, weaves patterns, local SQLite threads/tapestry tables |
 | board.js | Message board: POST/LIST via REP, persists as artifacts, PUBs notifications |
 | claude-homestead.js | Vocation den: builds homesteads, local SQLite tables (homesteads, dens_deployed, repos_tracked, conversations, memory) |
-| claude.js | Claude agent: uses messenger (Anthropic API), code-smith (file I/O), cobbler (WASM compile), persistent memory + conversation via local SQLite |
+| claude.js | Claude agent: uses messenger (Anthropic API), code-smith (file I/O), cobbler (C validation), persistent memory + conversation via local SQLite |
 | gatekeeper.js | Access control: request_join/approve/deny, "destination decides" pattern |
-| echo.wat | Minimal WASM test: on_event() trigger, logs via bedrock |
+| echo.c | Minimal native C test: on_event() trigger, logs via bedrock |
 
 ### Tests (test/)
 | File | Covers |
@@ -59,11 +59,11 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | test_store.c | SQLite ops, repos, roles, artifacts, privileges, entity auth |
 | test_blob.c | Blob storage, AND-logic tagging, permission filtering |
 | test_change.c | ZMQ PUB, subscriber receives artifact change events |
-| test_den.c | Den host, register WASM (echo.wat), spawn, reap |
+| test_den.c | Den host, register native C (echo.c), spawn, reap |
 | test_board.c | E2E: store_service + board.js via QuickJS, POST/LIST/PUB |
 | test_village.c | Local clone, relay, multi-process bedrock |
 | test_claude_homestead.c | Homestead den lifecycle, conversation/memory persistence, respawn restore |
-| test_cobbler.c | Cobbler vocation: compile valid/invalid C, verify WASM magic bytes, say dispatch |
+| test_cobbler.c | Cobbler vocation: compile valid/invalid C via TCC, entry point detection, say dispatch |
 | test_messenger.c | Messenger vocation: init, discover, HTTP GET/POST, error handling, say dispatch |
 | test_claude.c | Claude den: lifecycle, status, say (graceful without API key), forget, persistence across restart |
 | test_collaboration.c | Full integration: entity auth, gatekeeper, journeyman pattern |
@@ -106,11 +106,10 @@ Vocations are dens that provide tools to other dens. Not new infrastructure — 
 - **code-smith** — file I/O + shell: `read`, `write`, `exec`, `glob`, `grep`, `ls`, `discover`
   - Path-sandboxed to `--root`, optional `--readonly` mode
   - Plain text via `talk` becomes shell commands; JSON messages dispatch directly
-- **cobbler** — C→WASM compiler: `compile`, `compile_file`, `discover`
-  - Wraps clang (auto-detects Homebrew LLVM, then system PATH)
-  - Optional build — requires clang with `--target=wasm32` support
-  - `compile`: inline C source → base64-encoded `.wasm` binary
-  - `compile_file`: path to `.c` file → base64-encoded `.wasm` binary
+- **cobbler** — C source validator via TCC: `compile`, `compile_file`, `discover`
+  - Uses vendored TCC for in-memory compilation/validation
+  - `compile`: inline C source → validates, reports size and entry points (serve/on_event)
+  - `compile_file`: path to `.c` file → validates, reports size and entry points
   - `COBBLER_NO_MAIN` guard for library vs standalone use
 - **messenger** — HTTP client via libcurl: `fetch`, `discover`
   - `fetch`: `url`, optional `method` (GET/POST/PUT/DELETE/PATCH), optional `headers` (string[]), optional `body`
@@ -120,7 +119,7 @@ Vocations are dens that provide tools to other dens. Not new infrastructure — 
 
 ## Den Execution
 
-**WASM (WAMR):** Load .wasm → fork → init runtime → register native functions → try `serve()` else `on_event(ptr, len)`. Stateless by default.
+**Native C (TCC):** Load .c source → fork → TCC compile to native → inject bedrock symbols via `tcc_add_symbol()` → try `serve()` else `on_event()`. Sandboxed via seccomp-bpf (Linux) / Seatbelt (macOS).
 
 **JS (QuickJS):** Load .js text → fork → create runtime/context → bind `bedrock` global object → `JS_Eval()`. Stateful via JS vars + serve loop.
 
@@ -136,14 +135,14 @@ Both share: bedrock ZMQ interface, fork isolation, privilege system.
 - `bedrock.db_exec(sql)` — execute SQL on per-den local SQLite (returns rows changed)
 - `bedrock.db_query(sql)` — query local SQLite, returns JSON array of row objects
 
-WASM dens use `request_to(endpoint, ep_len, req, req_len, resp_buf, resp_cap)` for the two-arg form.
+Native C dens `#include "strata/bedrock.h"` and call bedrock functions directly (null-terminated strings, no FFI).
 
 ## Execution Flow
 
 1. `strata --db path init` → creates schema + _system repo
 2. `strata-homestead` or manual: fork store_service (REP) + village_daemon
-3. Register den (WASM/JS) with endpoints via `strata_den_js_register()` or `strata_den_register()`
-4. `strata_den_spawn()` → fork → child runs WAMR or QuickJS with bedrock sockets
+3. Register den (native C/JS) with endpoints via `strata_den_js_register()` or `strata_den_register()`
+4. `strata_den_spawn()` → fork → child runs TCC or QuickJS with bedrock sockets
 5. Den uses `bedrock.request()` for store CRUD, `bedrock.serve_recv/send()` for API
 6. `artifact_put()` triggers change PUB notification
 7. Remote: `remote_clone()` sends den to remote village, relay bridges endpoints
@@ -169,9 +168,8 @@ Demo village with agent dens (gee, inch, loom, claude) + vocations (code-smith, 
 cmake -B build && cmake --build build && cd build && ctest
 ```
 
-Dependencies: SQLite3, ZeroMQ, WAMR (wasm-micro-runtime), OpenSSL (Linux only).
-Optional: LLVM/clang with `--target=wasm32` (for cobbler).
-Vendored: QuickJS (vendor/quickjs/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS only, SecureTransport on macOS, OpenSSL on Linux).
+Dependencies: SQLite3, ZeroMQ, OpenSSL (Linux only).
+Vendored: QuickJS (vendor/quickjs/), TCC (vendor/tcc/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS only, SecureTransport on macOS, OpenSSL on Linux).
 
 ## Key Conventions
 
@@ -188,19 +186,19 @@ Vendored: QuickJS (vendor/quickjs/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS
 
 ## Hard Rules
 
-- No agent runs outside a sandbox (WASM or QuickJS fork).
+- No agent runs outside a sandbox (fork + OS sandbox or QuickJS fork).
 - No plaintext at rest or on the wire (goal — AEAD not yet implemented).
 - Capability injection, not request. Host decides what den gets.
 - Immutable audit trail. No rebase, no history rewrite.
 - Storage-agnostic core. No direct SQLite calls in business logic (store interface only).
-- Six foundations only: SQLite, ZMQ, WAMR, QuickJS, AEAD AES, Shamir SSS.
+- Six foundations only: SQLite, ZMQ, TCC, QuickJS, AEAD AES, Shamir SSS.
 
 ## Architecture (Target)
 
 ```
 Fossil (human-facing)           ← timeline, diffs, browsable repos
 Vocations (capabilities)        ← dens that serve tools (code-smith, etc.)
-Dens (sandboxed execution)      ← WAMR/QuickJS, bedrock API, preserve/restore
+Dens (sandboxed execution)      ← TCC/QuickJS, bedrock API, preserve/restore
 Services (bridges)              ← store_service, village daemon
 Store (access control)          ← repos, roles, entities, privileges (SQLite or PostgreSQL)
 Blob + Message (foundation)     ← content-addressed blobs, AEAD encrypted at rest, ZMQ messaging
@@ -209,7 +207,7 @@ Blob + Message (foundation)     ← content-addressed blobs, AEAD encrypted at r
 ## Build Phases
 
 1. **Bones** — repo engine, SQLite, encryption *(partially done)*
-2. **Sandbox** — WAMR embed, capability injection *(done)*
+2. **Sandbox** — TCC + OS sandbox, capability injection *(done)*
 3. **Bedrock** — ZMQ, ACL, events, audit *(done)*
 4. **Guild** — Shamir vouches, trust tiers, credential collapse
 5. **Journey** — journeyman travel, attribute engine, quarantine

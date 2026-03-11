@@ -1,7 +1,7 @@
 // claude — an agent den powered by the Claude API.
 //
 // Uses messenger (HTTP) to call the Anthropic API, code-smith for file I/O,
-// and cobbler for C-to-WASM compilation. Persists conversation history and
+// and cobbler for native C compilation. Persists conversation history and
 // memory in local SQLite — survives restarts and journeys.
 //
 // API (via REP):
@@ -139,8 +139,8 @@ var TOOLS = [
         }
     },
     {
-        name: "compile_wasm",
-        description: "Compile C source code to WASM binary",
+        name: "compile_c",
+        description: "Compile C source code to native binary",
         input_schema: {
             type: "object",
             properties: { source: { type: "string", description: "C source code" } },
@@ -197,7 +197,7 @@ function dispatch_tool(name, input) {
             CONFIG.smith_ep);
         return resp ? resp : '{"ok":false,"error":"code-smith unavailable"}';
     }
-    if (name === "compile_wasm" && CONFIG.cobbler_ep) {
+    if (name === "compile_c" && CONFIG.cobbler_ep) {
         var resp = bedrock.request(
             JSON.stringify({action: "compile", source: input.source}),
             CONFIG.cobbler_ep);
@@ -250,7 +250,7 @@ function call_claude(messages) {
         var t = TOOLS[i];
         if (t.name === "remember" || t.name === "recall") {
             available_tools.push(t);
-        } else if ((t.name === "compile_wasm") && CONFIG.cobbler_ep) {
+        } else if ((t.name === "compile_c") && CONFIG.cobbler_ep) {
             available_tools.push(t);
         } else if (CONFIG.smith_ep) {
             available_tools.push(t);

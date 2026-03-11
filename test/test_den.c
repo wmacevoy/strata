@@ -12,31 +12,23 @@
 int main(void) {
     printf("test_den\n");
 
-    /* Compile echo.wat -> echo.wasm if needed */
-    const char *wasm_path = "/tmp/strata_echo.wasm";
-    int rc = system("wat2wasm dens/echo.wat -o /tmp/strata_echo.wasm 2>&1");
-    if (rc != 0) {
-        fprintf(stderr, "wat2wasm failed (is wabt installed?)\n");
-        return 1;
-    }
-
     /* Create den host */
     TEST("create den host");
     strata_den_host *host = strata_den_host_create();
     assert(host != NULL);
     PASS();
 
-    /* Register echo den */
-    TEST("register echo den");
-    rc = strata_den_register(host, "echo", wasm_path,
-                               NULL, /* no trigger filter */
-                               NULL, /* no SUB endpoint */
-                               NULL  /* no REQ endpoint */);
+    /* Register echo den (native C) */
+    TEST("register echo den (native C)");
+    int rc = strata_den_register(host, "echo", "dens/echo.c",
+                                   NULL, /* no trigger filter */
+                                   NULL, /* no SUB endpoint */
+                                   NULL  /* no REQ endpoint */);
     assert(rc == 0);
     PASS();
 
     /* Spawn echo den with event payload */
-    TEST("spawn echo den (fork + WASM)");
+    TEST("spawn echo den (fork + TCC)");
     const char *event = "{\"change\":\"create\",\"repo_id\":\"proj-1\"}";
     pid_t pid = strata_den_spawn(host, "echo", event, (int)strlen(event));
     assert(pid > 0);
@@ -69,7 +61,6 @@ int main(void) {
 
     /* Cleanup */
     strata_den_host_free(host);
-    unlink(wasm_path);
 
     printf("ALL TESTS PASSED\n");
     return 0;

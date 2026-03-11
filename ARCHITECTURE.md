@@ -11,7 +11,7 @@ Layer 4: Dens           — sandboxed execution, bedrock API, preserve/restore
 Layer 3: Services       — store_service JSON bridge, village daemon
 Layer 2: Store          — repos, roles, entities, privileges
 Layer 1: Blob + Message — content-addressed blobs, ZMQ messaging
-Layer 0: Foundation     — SQLite, ZMQ, QuickJS, WAMR
+Layer 0: Foundation     — SQLite, ZMQ, QuickJS, TCC
 ```
 
 ---
@@ -26,8 +26,8 @@ Six components. Everything else is composed from these.
 | SQLite | Den local storage. Permanent choice — every den gets its own SQLite db. Not swappable. |
 | ZeroMQ | Communication. Brokerless messaging. REQ/REP, PUB/SUB. The sole communication plane. |
 | AEAD AES | Encryption at rest. Every blob in the village store is AEAD encrypted. Role-keyed envelopes. |
-| QuickJS | JS den runtime. Stateful serve loops. First-class alongside WASM. |
-| WAMR | WASM den runtime. Language-agnostic sandbox. Interpreter/AOT/JIT. |
+| QuickJS | JS den runtime. Stateful serve loops. First-class alongside native C. |
+| TCC | Native C den runtime. Vendored ~100KB compiler. Compiles C to native code, runs in fork-isolated sandbox. |
 
 Planned but not yet implemented:
 
@@ -165,7 +165,7 @@ Listens for remote clone requests. Receives a den definition (source + event), s
 
 **Remote clone frame protocol** (3-frame ZMQ multipart):
 1. Header JSON: `{"action":"clone", "den_name":"...", "mode":"js", "origin_req":"..."}`
-2. Den source: JS text or WASM binary
+2. Den source: JS text or C source
 3. Event JSON: initial payload
 
 The relay system bridges sockets between villages: REQ/REP proxy for store access, SUB/PUB proxy for event forwarding.
@@ -185,7 +185,7 @@ Sandboxed execution units. Every den runs in its own process (fork isolation) wi
 
 ### Bedrock API
 
-Every den — WASM or JS — gets the same 9 functions:
+Every den — native C or JS — gets the same 9 functions:
 
 | Function | Socket | Purpose |
 |----------|--------|---------|
@@ -203,7 +203,7 @@ Every den — WASM or JS — gets the same 9 functions:
 
 **JS (QuickJS):** Load .js → fork → bind `bedrock` global → `JS_Eval()`. Script runs its own serve loop. Stateful via JS vars + local SQLite.
 
-**WASM (WAMR):** Load .wasm → fork → register native functions → try `serve()` else `on_event(ptr, len)`. Language-agnostic (Rust, C, Zig, Go, AssemblyScript).
+**Native C (TCC):** Load .c source → fork → TCC compile to native → inject bedrock symbols via `tcc_add_symbol()` → try `serve()` else `on_event()`. Sandboxed via seccomp-bpf (Linux) / Seatbelt (macOS). Bedrock functions use null-terminated strings (not ptr/len pairs).
 
 Both share identical bedrock interface, fork isolation, and privilege system.
 
@@ -241,7 +241,7 @@ Current implementation: `local_db_save/load` automatically preserves the SQLite 
 
 ```
 Preserved Blob = {
-    source:       JS text or WASM binary (the den's code)
+    source:       JS text or C source (the den's code)
     state:        local SQLite database (the den's data)
     restore_plan: what to do on wake (resume action, last step, context)
     identity:     name, entity, privileges needed
@@ -318,8 +318,8 @@ Key files: `den.c`, `den.h`. Examples: `dens/gee.js`, `dens/inch.js`, `dens/loom
 ### To extend Layer 4
 
 - New JS den: follow the template above, add to `dens/`, register in village launcher
-- New WASM den: export `serve()` or `on_event(ptr, len)`, import bedrock functions
-- New bedrock function: add to `bedrock_ctx_t`, implement for both JS and WASM, register in `js_child_run`/`wasm_child_run`
+- New native C den: write C source including `strata/bedrock.h`, export `serve()` or `on_event()`
+- New bedrock function: add to `bedrock_ctx_t`, implement for both JS and native C, register in `js_child_run`/`native_child_run`
 
 ---
 
@@ -362,38 +362,26 @@ Local SQLite tables: `homesteads`, `dens_deployed`, `repos_tracked`.
 
 Key file: `dens/claude-homestead.js`.
 
-### cobbler (planned — heavyweight, optional)
+### cobbler
 
-WASM compiler vocation. Dens building dens. Takes source code in, produces `.wasm` binary out, stored as a blob ready for preserve/restore deployment.
-
-**Two-phase approach:**
-
-**Phase 1 (now):** C vocation service linking libclang/LLVM. LLVM already has a mature WASM backend — no architecture mismatch, no new runtime. Heavyweight (~100MB LLVM dependency) but works today. Same pattern as code-smith: ZMQ REP loop, JSON dispatch, sandboxed output.
+C source validator vocation. Validates that C source compiles correctly using vendored TCC. Same pattern as code-smith: ZMQ REP loop, JSON dispatch.
 
 ```
-C source → cobbler (libclang/LLVM) → .wasm blob → preservable den
+C source → cobbler (TCC) → validation result
 ```
 
 | Action | Purpose |
 |--------|---------|
-| `compile` | Compile source to `.wasm`, store as blob |
-| `compile_file` | Compile from path (via code-smith) |
-| `discover` | List supported languages and options |
+| `compile` | Validate C source compiles correctly |
+| `compile_file` | Validate C source from path (via code-smith) |
+| `discover` | List available actions |
 
 ```json
 {"action":"compile", "source":"...", "lang":"c", "exports":["serve"]}
-→ {"ok":true, "blob_id":"sha256...", "size":4096}
+→ {"ok":true, "valid":true, "size":4096}
 ```
 
-The output blob is a `.wasm` binary — a complete den ready for preserve/restore. Combined with claude-homestead's `deploy_den`, the full cycle is: write C → cobbler compiles to WASM → blob stored → claude-homestead deploys to target village → den restored and running.
-
-**Phase 2 (later):** Self-hosting compiler inside the sandbox. Two candidate paths:
-
-- **TCC with WASM backend** — TCC is ~100KB, self-hosting, but currently targets register machines (x86, ARM, RISC-V), not WASM's stack machine. A WASM codegen backend for TCC is real work but bounded. If achieved: TCC compiled to WASM, running in WAMR, compiling C to WASM. Fully sandboxed, self-hosting cobbler.
-
-- **RISC-V as alternative sandbox** — TCC already has a RISC-V backend. A lightweight RISC-V interpreter (~2-3K lines of C) provides the same sandboxing properties as WAMR (memory isolation, capability injection via ecalls, no host escape). TCC→RISC-V is trivial; self-hosting is immediate. Trade-off: adds a third runtime (`STRATA_MODE_RV32`) but avoids the stack machine mismatch entirely. Interpreter performance is the concern — would need JIT/AOT eventually.
-
-Phase 2 replaces the LLVM dependency with something small enough to live inside the sandbox. The cobbler's REP interface stays the same — only the backend changes.
+The cobbler validates that C source is well-formed and can be compiled by TCC. Combined with claude-homestead's `deploy_den`, the full cycle is: write C → cobbler validates → source stored as blob → claude-homestead deploys to target village → den compiled and running via TCC.
 
 ### To add a new vocation
 
@@ -482,12 +470,12 @@ Dens don't talk directly to each other. Two patterns:
 
 | Layer | Implemented | Planned |
 |-------|-------------|---------|
-| 0: Foundation | SQLite, ZMQ, QuickJS, WAMR | — |
+| 0: Foundation | SQLite, ZMQ, QuickJS, TCC | — |
 | 1: Blob + Message | Blob CRUD, tag search, role filtering | AEAD encryption at rest (foundational, not yet implemented) |
 | 2: Store | Repos, artifacts, roles, privileges, entity auth | Shamir trust tiers, vouch system, attribute engine |
 | 3: Services | store_service, village daemon, code-smith | Encrypted sync, ACL enforcement on ZMQ |
-| 4: Dens | JS + WASM runtimes, bedrock API, basic local_db save/load | Rich preserve (source + state + restore plan), quarantine |
-| 5: Vocations | code-smith, claude-homestead | cobbler (LLVM→WASM compiler, then self-hosting), word-smith, mail-smith |
+| 4: Dens | JS + native C runtimes, bedrock API, basic local_db save/load | Rich preserve (source + state + restore plan), quarantine |
+| 5: Vocations | code-smith, claude-homestead, cobbler | word-smith, mail-smith |
 | 6: Fossil | strata-human REPL, basic artifact browsing | Full timeline/diff/branch UI |
 
 ### Rich Preserve/Restore (target)
@@ -496,7 +484,7 @@ The current `local_db_save/load` is a primitive preserve: it saves the SQLite da
 
 ```
 Preserved Blob = {
-    source:       JS text or WASM binary
+    source:       JS text or C source
     state:        local SQLite database
     restore_plan: resume action, last step, context
     identity:     name, entity, privileges needed

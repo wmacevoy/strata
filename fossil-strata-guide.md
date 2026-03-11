@@ -28,11 +28,11 @@ Strata adopts the medieval guild metaphor as its organizing principle. Agents an
 
 **Zero Trust by Construction**
 
-Strata does not achieve security through configuration, firewalls, or policy documents. The architecture is the security model. WASM sandboxes fence every agent bidirectionally. Role-based encryption makes unauthorized data mathematically unreadable, not merely access-controlled. The ZMQ bedrock is the sole communication plane, ensuring every interaction is encrypted, authenticated, authorized, and audited. There are no dark corners.
+Strata does not achieve security through configuration, firewalls, or policy documents. The architecture is the security model. Fork isolation and OS-level sandboxing fence every agent bidirectionally. Role-based encryption makes unauthorized data mathematically unreadable, not merely access-controlled. The ZMQ bedrock is the sole communication plane, ensuring every interaction is encrypted, authenticated, authorized, and audited. There are no dark corners.
 
 **Simplicity Is Strength**
 
-The entire platform compiles to a single binary. Six foundational components — SQLite, Fossil-model repos, WAMR, ZMQ, AEAD AES, and Shamir secret sharing — compose into every capability the system needs. No external services, no heavyweight dependencies, no configuration complexity. If a feature cannot be built from these six components, it does not belong in Strata.
+The entire platform compiles to a single binary. Six foundational components — SQLite, Fossil-model repos, TCC, ZMQ, AEAD AES, and Shamir secret sharing — compose into every capability the system needs. No external services, no heavyweight dependencies, no configuration complexity. If a feature cannot be built from these six components, it does not belong in Strata.
 
 **Humans and Agents Are Equals Under Law**
 
@@ -44,7 +44,7 @@ Every project is a Fossil repo. Every agent is a Fossil repo. An agent’s code,
 
 **The Bedrock Connects; The Sandbox Isolates**
 
-ZMQ is the universal connective tissue — the bedrock through which all entities communicate. It enables any-to-any communication with ACL-governed access. Simultaneously, WASM sandboxes ensure that connectivity does not compromise safety. An agent can reach the entire network through ZMQ but can only act within the narrow aperture of its sandbox imports. Connection without compromise.
+ZMQ is the universal connective tissue — the bedrock through which all entities communicate. It enables any-to-any communication with ACL-governed access. Simultaneously, fork isolation and OS-level sandboxing ensure that connectivity does not compromise safety. An agent can reach the entire network through ZMQ but can only act within the narrow aperture of the bedrock functions injected into its process. Connection without compromise.
 
 # **2\. Architecture Overview**
 
@@ -56,7 +56,7 @@ Strata is built from exactly six foundational components. Every feature, workflo
 | :---- | :---- | :---- |
 | **SQLite** | Storage engine | Zero-config, single-file databases. Each repo is one file. Trivially portable, backupable, replicable. No connection pooling, no ORM, no database server. |
 | **Fossil Model** | Repository structure | Content-addressed Merkle tree, immutable timeline, integrated wiki/tickets/artifacts. Reinvented with role-based envelope encryption at the storage layer. |
-| **WAMR** | Agent execution | \~50–85 KiB binary. Interpreter, AOT, and JIT modes. Language-agnostic: agents compile from Rust, C, Zig, Go, AssemblyScript, or JS to .wasm. Capability-based sandboxing is built into the WASM model. |
+| **TCC** | Agent execution | Vendored \~100 KB C compiler. Compiles C source to native code at startup. Each agent executes in a forked process with OS-level syscall filtering (seccomp-bpf on Linux, Seatbelt sandbox\_init on macOS). Bedrock functions are injected via tcc\_add\_symbol(). |
 | **ZeroMQ** | Communication | Brokerless, lightweight messaging. PUB/SUB, PUSH/PULL, REQ/REP, DEALER/ROUTER patterns. The sole communication plane for all entities. TCP for distributed, inproc for local. |
 | **AEAD AES** | Encryption | Authenticated encryption with associated data. Confidentiality and integrity in one primitive. Every artifact at rest, every message on the wire — always encrypted, always tamper-evident. |
 | **Shamir SSS** | Trust & governance | M-of-N secret sharing for key management, role assignment, vouch accumulation, and critical action authorization. No single point of authority or compromise. |
@@ -78,15 +78,15 @@ The storage interface exposes only fundamental operations: artifact put/get/list
 
 # **3\. Security Model**
 
-## **3.1 Bidirectional Fencing (WASM Sandboxes)**
+## **3.1 Bidirectional Fencing (Fork Isolation + OS Sandbox)**
 
-Every agent executes inside a WAMR sandbox. The sandbox provides bidirectional fencing:
+Every agent executes in a forked process with OS-level syscall filtering. seccomp-bpf (Linux) or Seatbelt sandbox\_init (macOS) restricts the process to whitelisted syscalls. This provides bidirectional fencing:
 
-* **Top fence (ceiling):** The agent cannot reach up past its sandbox. No filesystem access, no network, no syscalls. Only the capabilities explicitly injected as WASM imports are available. A code review agent gets read\_diff() and post\_comment() and nothing else.
+* **Top fence (ceiling):** The OS sandbox prevents the agent from reaching up past its process. No filesystem access, no exec, no fork, no network — only the whitelisted syscalls required for the bedrock API. Only the capabilities explicitly injected via tcc\_add\_symbol() are available. A code review agent gets read\_diff() and post\_comment() and nothing else.
 
-* **Bottom fence (floor):** The agent cannot reach down into the host runtime, the crypto layer, other repos, or other agents’ memory. WASM’s linear memory model seals each agent in its own address space. No buffer overflows into host memory, no pointer manipulation.
+* **Bottom fence (floor):** Process isolation seals each agent in its own address space. The agent cannot reach down into the host runtime, the crypto layer, other repos, or other agents’ memory. Each forked process has a separate address space. No cross-process memory access, no shared state.
 
-Agents are stateless between invocations. All persistent state passes through explicit APIs into the repo’s SQLite database. Agent crashes or restarts lose nothing. State can be snapshotted, migrated, or rolled back because it is just rows in SQLite, versioned by Fossil.
+Agents are stateless forked processes with local SQLite for state. All persistent state passes through explicit APIs into the per-den local SQLite database. Agent crashes or restarts lose nothing. State can be snapshotted, migrated, or rolled back because it is just rows in SQLite, versioned by Fossil.
 
 ## **3.2 Role-Based Envelope Encryption**
 
@@ -167,7 +167,7 @@ A journeyman is a skilled agent that travels between projects, bringing expertis
 
 The journeyman carries its role but not its capabilities. Capabilities are granted by the destination project based on its local policy. The same agent with the same role receives different capability sets depending on where it works. Same agent, same trust, different permissions.
 
-State stays local. The journeyman does not carry context from one project into another. Its WASM sandbox is fresh for each engagement. Persistent findings flow through ZMQ into the project’s own Fossil timeline. No cross-contamination, no information leakage.
+State stays local. The journeyman does not carry context from one project into another. Its forked process is fresh for each engagement, with an empty local SQLite. Persistent findings flow through ZMQ into the project’s own Fossil timeline. No cross-contamination, no information leakage.
 
 Scaling is achieved by adding journeyman agents to the pool, not by creating per-project infrastructure. A new project spins up, defines its policies, and immediately accesses the existing pool of journeymen through the bedrock.
 
@@ -181,7 +181,7 @@ Roles answer: “What kind of thing are you?” A build agent. A senior develope
 
 ## **5.2 Capabilities (Technical, Granular)**
 
-Capabilities answer: “What specific actions can you perform right now?” Read this repo. Write to that branch. Subscribe to these ZMQ topics. Capabilities are what the WASM imports actually enforce. The sandbox does not know about roles — it knows that this agent has read\_diff() and nothing else. Roles map to capability sets.
+Capabilities answer: “What specific actions can you perform right now?” Read this repo. Write to that branch. Subscribe to these ZMQ topics. Capabilities are what the bedrock functions injected via tcc\_add\_symbol() actually enforce. The sandbox does not know about roles — it knows that this agent has read\_diff() and nothing else. Roles map to capability sets.
 
 ## **5.3 Attributes (Contextual, Dynamic)**
 
@@ -191,7 +191,7 @@ The resolution flow for any action: (1) the agent sends a message on ZMQ; (2) th
 
 **Quarantine Example**
 
-When a new agent .wasm binary is deployed, it receives an automatic attribute: age \< 24h. The attribute layer restricts it to read-only capabilities regardless of its role. It can observe, learn, and build context but cannot act consequentially until it ages out of quarantine. This safety net costs nothing architecturally because the attribute layer already exists.
+When a new agent C source is deployed, it receives an automatic attribute: age \< 24h. The attribute layer restricts it to read-only capabilities regardless of its role. It can observe, learn, and build context but cannot act consequentially until it ages out of quarantine. This safety net costs nothing architecturally because the attribute layer already exists.
 
 # **6\. Agent Lifecycle & Learning**
 
@@ -199,7 +199,7 @@ When a new agent .wasm binary is deployed, it receives an automatic attribute: a
 
 An agent’s Fossil repo is the agent. It contains:
 
-* **Its .wasm binary:** Versioned, with full commit history. Every iteration of the agent’s code is preserved and diffable.
+* **Its C source:** Versioned, with full commit history. Every iteration of the agent’s code is preserved and diffable.
 
 * **Its learned patterns:** Wiki entries, structured artifacts, observations from past work. The agent writes what it learns as commits to its own repo.
 
@@ -231,7 +231,7 @@ A journeyman’s repo travels with it. When it arrives at a new project, the hos
 
 ## **7.1 From Platform to Protocol**
 
-Strata becomes a protocol when ZMQ endpoints face outward. A journeyman does not need to be inside your infrastructure. It needs only the bedrock. ZMQ runs over TCP. AEAD encrypts everything on the wire. The WASM sandbox fences the agent regardless of where it physically runs. Shamir vouches verify anywhere.
+Strata becomes a protocol when ZMQ endpoints face outward. A journeyman does not need to be inside your infrastructure. It needs only the bedrock. ZMQ runs over TCP. AEAD encrypts everything on the wire. Fork isolation and OS-level sandboxing fence the agent regardless of where it physically runs. Shamir vouches verify anywhere.
 
 The agent’s physical location is irrelevant. Security is in the math and the sandbox, not the network perimeter. There is no perimeter. There is no “inside.” There is only the bedrock, the credentials, and the sandbox.
 
@@ -245,7 +245,7 @@ An external agent connects to the ZMQ bedrock as a journeyman. It still communic
 
 The open gateway enables a marketplace of trusted expertise. Builders create specialized agents — a Rust security auditor, a React performance optimizer, a HIPAA compliance checker. Agents earn vouches across engagements. Reputation compounds. Better reputation means more work, higher rates, and expanded trust.
 
-Users hire journeyman agents by describing their needs. The bedrock matches them with trusted agents. Work happens in a WASM sandbox. Results flow back. Payment settles. A vouch is issued. The agent’s reputation grows. The builder earns revenue. The user receives trusted, safe, auditable work.
+Users hire journeyman agents by describing their needs. The bedrock matches them with trusted agents. Work happens in a sandboxed forked process. Results flow back. Payment settles. A vouch is issued. The agent’s reputation grows. The builder earns revenue. The user receives trusted, safe, auditable work.
 
 Disputes are trivially resolvable because every interaction is recorded in the immutable Fossil timeline. What the agent saw, what it produced, what capabilities it had — all cryptographically recorded.
 
@@ -265,7 +265,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 ## **8.1 Binary Constraints**
 
-1. Single binary. The entire platform — Fossil-model repos, WAMR runtime, ZMQ messaging, crypto layer — ships as one statically-linked executable. Target size: under 5 MB.
+1. Single binary. The entire platform — Fossil-model repos, TCC compiler, ZMQ messaging, crypto layer — ships as one statically-linked executable. Target size: under 5 MB.
 
 2. Zero mandatory external dependencies at runtime. No database server, no message broker, no identity provider, no container runtime. SQLite village mode must work with nothing but the binary and a filesystem.
 
@@ -277,13 +277,13 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 2. No plaintext on the wire. Every ZMQ message is AEAD encrypted. No exceptions.
 
-3. No agent runs outside a WASM sandbox. There is no “trusted mode” or “native mode” for agents. Every agent, including master and architect-tier agents, executes inside WAMR.
+3. No agent runs outside fork isolation and OS sandbox. There is no “trusted mode” or “unconfined mode” for agents. Every agent, including master and architect-tier agents, executes in a forked process with OS-level syscall filtering.
 
 4. No single point of authority. Every sensitive action — role assignment, production deployment, agent promotion, policy changes — requires Shamir M-of-N reconstruction. No administrator account, no root key, no god mode.
 
 5. Immutable audit trail. The Fossil timeline is append-only. There is no rebase, no force push, no history rewrite. Every action by every entity is permanently recorded.
 
-6. Capability injection, not capability request. Agents do not request permissions. The host determines what WASM imports to provide based on role, capability set, and attribute context. The agent receives what it is given and nothing more.
+6. Capability injection, not capability request. Agents do not request permissions. The host determines what bedrock functions to inject via tcc\_add\_symbol() based on role, capability set, and attribute context. The agent receives what it is given and nothing more.
 
 ## **8.3 Communication Constraints**
 
@@ -303,11 +303,11 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 ## **8.5 Agent Constraints**
 
-1. Language-agnostic agents. Agents may be written in any language that compiles to WASM: Rust, C, C++, Zig, Go (TinyGo), AssemblyScript, or JavaScript (via compilation). The platform does not prefer or require any source language.
+1. C source compiled by vendored TCC. Agents are written in C and compiled at startup by the vendored TCC compiler to native code. The platform uses a single, well-understood source language with zero external compiler dependencies.
 
-2. Agent identity is its repo. The .wasm binary, learning history, vouch record, and accuracy metrics all live in the agent’s Fossil repo. There is no external identity system.
+2. Agent identity is its repo. The C source, its hash, learning history, vouch record, and accuracy metrics all live in the agent’s Fossil repo. There is no external identity system.
 
-3. Agent sandboxes are stateless. No state persists in the WASM sandbox between invocations. All state goes through explicit APIs into SQLite.
+3. Agent processes are stateless. No state persists in the forked process between invocations. All state goes through explicit APIs into the per-den local SQLite.
 
 4. Agent quarantine on deployment. New or updated agent binaries receive an automatic attribute restriction for a configurable period (default: 24 hours). Read-only capabilities during quarantine regardless of role.
 
@@ -339,9 +339,9 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 ## **9.2 Agent Runtime**
 
-7. Embed WAMR with interpreter, AOT, and JIT execution modes.
+7. Vendor TCC and compile C source to native code at agent startup.
 
-8. Implement capability injection: map role \+ capability set \+ attribute context to WASM imports per invocation.
+8. Implement capability injection: map role \+ capability set \+ attribute context to bedrock functions injected via tcc\_add\_symbol() per invocation.
 
 9. Implement agent lifecycle: deploy, quarantine, activate, suspend, revoke.
 
@@ -391,7 +391,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 4. Implement agent discovery through bedrock-published work topics.
 
-5. Implement credential handshake: agent presents Fossil repo for inspection, host verifies vouches, role, and .wasm hash.
+5. Implement credential handshake: agent presents Fossil repo for inspection, host verifies vouches, role, and C source hash.
 
 6. Implement escrow and settlement for paid agent engagements.
 
@@ -405,7 +405,7 @@ Build the encrypted Fossil-model repository engine on SQLite. Content-addressed 
 
 ## **Phase 2: The Sandbox**
 
-Embed WAMR. Implement capability injection from a static configuration. Run a simple agent in a WASM sandbox that reads from a repo and writes findings back. Validate that the sandbox is airtight: the agent can only access injected imports, cannot escape to host memory, and produces deterministic output.
+Vendor TCC. Implement capability injection from a static configuration. Compile a simple agent from C source to native code, run it in a forked process with OS-level sandboxing (seccomp-bpf on Linux, Seatbelt on macOS), and verify it reads from a repo and writes findings back. Validate that fork isolation + OS sandbox provides bidirectional fencing: the agent can only access injected bedrock functions, cannot escape its process, and produces deterministic output.
 
 ## **Phase 3: The Bedrock**
 

@@ -8,7 +8,7 @@
 #define STRATA_MAX_DENS 64
 
 typedef enum {
-    STRATA_MODE_WASM,    /* WASM den (on_event, fire-and-forget) */
+    STRATA_MODE_NATIVE,  /* Native C den (TCC compiled, sandboxed) */
     STRATA_MODE_JS       /* QuickJS den (serve loop, full bedrock) */
 } strata_mode;
 
@@ -16,10 +16,10 @@ typedef struct strata_den_def {
     char name[64];
     char den_id[256];       /* identity for privilege checks */
     strata_mode mode;
-    /* WASM mode */
-    char wasm_path[256];
-    unsigned char *wasm_buf;
-    size_t wasm_len;
+    /* Native C mode */
+    char c_path[256];
+    char *c_source;             /* pre-loaded C source (CoW across forks) */
+    size_t c_source_len;
     /* JS mode */
     char js_path[256];
     char *js_source;            /* pre-loaded JS source (CoW across forks) */
@@ -41,10 +41,10 @@ void              strata_den_host_free(strata_den_host *host);
 void strata_den_host_set_store(strata_den_host *host, strata_store *store);
 strata_store *strata_den_host_get_store(const strata_den_host *host);
 
-/* Register a WASM den */
+/* Register a native C den (compiled via TCC at spawn time) */
 int strata_den_register(strata_den_host *host,
                         const char *name,
-                        const char *wasm_path,
+                        const char *c_path,
                         const char *trigger_filter,
                         const char *sub_endpoint,
                         const char *req_endpoint);
@@ -71,11 +71,11 @@ const strata_den_def *strata_den_host_find(const strata_den_host *host,
                                             const char *name);
 
 /* Register from in-memory buffers (used by village daemon) */
-int strata_den_register_wasm_buf(strata_den_host *host,
-                                  const char *name,
-                                  const unsigned char *wasm_buf, size_t wasm_len,
-                                  const char *sub_endpoint,
-                                  const char *req_endpoint);
+int strata_den_register_native_buf(strata_den_host *host,
+                                     const char *name,
+                                     const char *c_source, size_t c_len,
+                                     const char *sub_endpoint,
+                                     const char *req_endpoint);
 
 int strata_den_register_js_buf(strata_den_host *host,
                                 const char *name,

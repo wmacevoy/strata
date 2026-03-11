@@ -5,13 +5,14 @@
 #include <sys/wait.h>
 #include <zmq.h>
 #include <sqlite3.h>
-#include <wasm_export.h>
+#include <libtcc.h>
 
 #include "strata/den.h"
 #include "strata/store.h"
+#include "strata/sandbox.h"
 
 /* ------------------------------------------------------------------ */
-/*  Bedrock context — shared by WASM natives and QuickJS bindings   */
+/*  Bedrock context — shared by native C and QuickJS bindings        */
 /* ------------------------------------------------------------------ */
 
 #define MAX_PEER_SOCKS 8
@@ -296,106 +297,91 @@ cleanup_file:
 }
 
 /* ------------------------------------------------------------------ */
-/*  WASM native functions                                              */
+/*  Native C bedrock functions (used by TCC-compiled dens)             */
 /* ------------------------------------------------------------------ */
 
-static void wasm_bedrock_log(wasm_exec_env_t exec_env,
-                          char *msg, int32_t msg_len) {
-    (void)exec_env;
-    fprintf(stderr, "[wasm] %.*s\n", msg_len, msg);
+/* File-scoped context — safe because each den runs in its own forked process */
+static bedrock_ctx_t *g_bedrock_ctx;
+
+static void native_bedrock_log(const char *msg) {
+    fprintf(stderr, "[native] %s\n", msg ? msg : "(null)");
 }
 
-static int32_t wasm_bedrock_subscribe(wasm_exec_env_t exec_env,
-                                   char *filter, int32_t filter_len) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->sub_sock) return -1;
-    return zmq_setsockopt(bedrock->sub_sock, ZMQ_SUBSCRIBE, filter, filter_len);
+static int native_bedrock_subscribe(const char *filter) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->sub_sock || !filter) return -1;
+    return zmq_setsockopt(g_bedrock_ctx->sub_sock, ZMQ_SUBSCRIBE,
+                          filter, strlen(filter));
 }
 
-static int32_t wasm_bedrock_receive(wasm_exec_env_t exec_env,
-                                 char *topic_buf, int32_t topic_cap,
-                                 char *payload_buf, int32_t payload_cap) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->sub_sock) return -1;
-    int rc = zmq_recv(bedrock->sub_sock, topic_buf, topic_cap, 0);
+static int native_bedrock_receive(char *topic_buf, int topic_cap,
+                                  char *payload_buf, int payload_cap) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->sub_sock) return -1;
+    int rc = zmq_recv(g_bedrock_ctx->sub_sock, topic_buf, topic_cap - 1, 0);
     if (rc < 0) return -1;
-    return zmq_recv(bedrock->sub_sock, payload_buf, payload_cap, 0);
+    topic_buf[rc < topic_cap ? rc : topic_cap - 1] = '\0';
+    rc = zmq_recv(g_bedrock_ctx->sub_sock, payload_buf, payload_cap - 1, 0);
+    if (rc >= 0) payload_buf[rc < payload_cap ? rc : payload_cap - 1] = '\0';
+    return rc;
 }
 
-static int32_t wasm_bedrock_request(wasm_exec_env_t exec_env,
-                                 char *req, int32_t req_len,
-                                 char *resp_buf, int32_t resp_cap) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->req_sock) return -1;
-    int rc = zmq_send(bedrock->req_sock, req, req_len, 0);
+static int native_bedrock_request(const char *req_json,
+                                  char *resp_buf, int resp_cap) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->req_sock || !req_json) return -1;
+    int rc = zmq_send(g_bedrock_ctx->req_sock, req_json, strlen(req_json), 0);
     if (rc < 0) return -1;
-    return zmq_recv(bedrock->req_sock, resp_buf, resp_cap, 0);
+    rc = zmq_recv(g_bedrock_ctx->req_sock, resp_buf, resp_cap - 1, 0);
+    if (rc >= 0) resp_buf[rc] = '\0';
+    return rc;
 }
 
-static int32_t wasm_bedrock_request_to(wasm_exec_env_t exec_env,
-                                       char *endpoint, int32_t ep_len,
-                                       char *req, int32_t req_len,
-                                       char *resp_buf, int32_t resp_cap) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock) return -1;
-    char ep[256];
-    int n = ep_len < 255 ? ep_len : 255;
-    memcpy(ep, endpoint, n);
-    ep[n] = '\0';
-    void *sock = bedrock_peer_sock(bedrock, ep);
+static int native_bedrock_request_to(const char *endpoint,
+                                     const char *req_json,
+                                     char *resp_buf, int resp_cap) {
+    if (!g_bedrock_ctx || !endpoint || !req_json) return -1;
+    void *sock = bedrock_peer_sock(g_bedrock_ctx, endpoint);
     if (!sock) return -1;
-    int rc = zmq_send(sock, req, req_len, 0);
+    int rc = zmq_send(sock, req_json, strlen(req_json), 0);
     if (rc < 0) return -1;
-    return zmq_recv(sock, resp_buf, resp_cap, 0);
+    rc = zmq_recv(sock, resp_buf, resp_cap - 1, 0);
+    if (rc >= 0) resp_buf[rc] = '\0';
+    return rc;
 }
 
-static int32_t wasm_bedrock_publish(wasm_exec_env_t exec_env,
-                                 char *topic, int32_t topic_len,
-                                 char *payload, int32_t payload_len) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->pub_sock) return -1;
-    zmq_send(bedrock->pub_sock, topic, topic_len, ZMQ_SNDMORE);
-    return zmq_send(bedrock->pub_sock, payload, payload_len, 0);
+static int native_bedrock_publish(const char *topic, const char *payload) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->pub_sock || !topic || !payload) return -1;
+    zmq_send(g_bedrock_ctx->pub_sock, topic, strlen(topic), ZMQ_SNDMORE);
+    return zmq_send(g_bedrock_ctx->pub_sock, payload, strlen(payload), 0);
 }
 
-static int32_t wasm_bedrock_serve_recv(wasm_exec_env_t exec_env,
-                                    char *buf, int32_t cap) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->rep_sock) return -1;
-    return zmq_recv(bedrock->rep_sock, buf, cap, 0);
+static int native_bedrock_serve_recv(char *buf, int cap) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->rep_sock) return -1;
+    int rc = zmq_recv(g_bedrock_ctx->rep_sock, buf, cap - 1, 0);
+    if (rc >= 0) buf[rc] = '\0';
+    return rc;
 }
 
-static int32_t wasm_bedrock_serve_send(wasm_exec_env_t exec_env,
-                                    char *resp, int32_t resp_len) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->rep_sock) return -1;
-    return zmq_send(bedrock->rep_sock, resp, resp_len, 0);
+static int native_bedrock_serve_send(const char *resp) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->rep_sock || !resp) return -1;
+    return zmq_send(g_bedrock_ctx->rep_sock, resp, strlen(resp), 0);
 }
 
-static int32_t wasm_bedrock_db_exec(wasm_exec_env_t exec_env,
-                                    char *sql, int32_t sql_len) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->local_db) return -1;
-    char *sql_z = strndup(sql, sql_len);
-    if (!sql_z) return -1;
+static int native_bedrock_db_exec(const char *sql) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->local_db || !sql) return -1;
     char *errmsg = NULL;
-    int rc = sqlite3_exec(bedrock->local_db, sql_z, NULL, NULL, &errmsg);
-    free(sql_z);
-    if (errmsg) { fprintf(stderr, "[wasm] db_exec: %s\n", errmsg); sqlite3_free(errmsg); }
+    int rc = sqlite3_exec(g_bedrock_ctx->local_db, sql, NULL, NULL, &errmsg);
+    if (errmsg) {
+        fprintf(stderr, "[native] db_exec: %s\n", errmsg);
+        sqlite3_free(errmsg);
+    }
     if (rc != SQLITE_OK) return -1;
-    return sqlite3_changes(bedrock->local_db);
+    return sqlite3_changes(g_bedrock_ctx->local_db);
 }
 
-static int32_t wasm_bedrock_db_query(wasm_exec_env_t exec_env,
-                                     char *sql, int32_t sql_len,
-                                     char *result_buf, int32_t result_cap) {
-    bedrock_ctx_t *bedrock = wasm_runtime_get_function_attachment(exec_env);
-    if (!bedrock || !bedrock->local_db) return -1;
-    char *sql_z = strndup(sql, sql_len);
-    if (!sql_z) return -1;
+static int native_bedrock_db_query(const char *sql,
+                                   char *result_buf, int result_cap) {
+    if (!g_bedrock_ctx || !g_bedrock_ctx->local_db || !sql) return -1;
     sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(bedrock->local_db, sql_z, -1, &stmt, NULL);
-    free(sql_z);
+    int rc = sqlite3_prepare_v2(g_bedrock_ctx->local_db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) return -1;
 
     int pos = 0;
@@ -734,7 +720,7 @@ strata_den_host *strata_den_host_create(void) {
 void strata_den_host_free(strata_den_host *host) {
     if (!host) return;
     for (int i = 0; i < host->den_count; i++) {
-        free(host->dens[i].wasm_buf);
+        free(host->dens[i].c_source);
         free(host->dens[i].js_source);
     }
     free(host);
@@ -764,42 +750,27 @@ static char *load_text_file(const char *path) {
     return buf;
 }
 
-static unsigned char *load_file(const char *path, size_t *out_len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    unsigned char *buf = malloc(len);
-    if (!buf) { fclose(f); return NULL; }
-    if ((long)fread(buf, 1, len, f) != len) {
-        free(buf); fclose(f); return NULL;
-    }
-    fclose(f);
-    *out_len = (size_t)len;
-    return buf;
-}
-
 int strata_den_register(strata_den_host *host,
-                          const char *name, const char *wasm_path,
+                          const char *name, const char *c_path,
                           const char *trigger_filter,
                           const char *sub_endpoint, const char *req_endpoint) {
     if (!host || host->den_count >= STRATA_MAX_DENS) return -1;
 
     strata_den_def *def = &host->dens[host->den_count];
     memset(def, 0, sizeof(*def));
-    def->mode = STRATA_MODE_WASM;
+    def->mode = STRATA_MODE_NATIVE;
     strncpy(def->name, name, sizeof(def->name) - 1);
-    strncpy(def->wasm_path, wasm_path, sizeof(def->wasm_path) - 1);
+    strncpy(def->c_path, c_path, sizeof(def->c_path) - 1);
     if (trigger_filter) strncpy(def->trigger_filter, trigger_filter, sizeof(def->trigger_filter) - 1);
     if (sub_endpoint) strncpy(def->sub_endpoint, sub_endpoint, sizeof(def->sub_endpoint) - 1);
     if (req_endpoint) strncpy(def->req_endpoint, req_endpoint, sizeof(def->req_endpoint) - 1);
 
-    def->wasm_buf = load_file(wasm_path, &def->wasm_len);
-    if (!def->wasm_buf) {
-        fprintf(stderr, "failed to load %s\n", wasm_path);
+    def->c_source = load_text_file(c_path);
+    if (!def->c_source) {
+        fprintf(stderr, "failed to load %s\n", c_path);
         return -1;
     }
+    def->c_source_len = strlen(def->c_source);
     host->den_count++;
     return 0;
 }
@@ -830,94 +801,70 @@ int strata_den_js_register(strata_den_host *host,
 }
 
 /* ------------------------------------------------------------------ */
-/*  WASM child runner                  */
+/*  Native C child runner (TCC in-memory compilation)                  */
 /* ------------------------------------------------------------------ */
 
-static void wasm_child_run(strata_den_def *def,
-                           const char *event_json, int event_len) {
-    char err[128];
+static void native_child_run(strata_den_def *def,
+                             const char *event_json, int event_len) {
     bedrock_ctx_t bedrock;
     bedrock_setup(&bedrock, def);
     local_db_load(&bedrock, def);
+    g_bedrock_ctx = &bedrock;
 
-    if (!wasm_runtime_init()) {
-        fprintf(stderr, "wasm_runtime_init failed\n");
+    /* Apply OS sandbox before compiling/running untrusted code */
+    strata_sandbox_apply();
+
+    TCCState *s = tcc_new();
+    if (!s) {
+        fprintf(stderr, "[native] tcc_new failed\n");
         goto cleanup;
     }
 
-    static NativeSymbol natives[] = {
-        { "log",        (void *)wasm_bedrock_log,        "(*~)",     NULL },
-        { "subscribe",  (void *)wasm_bedrock_subscribe,   "(*~)i",    NULL },
-        { "receive",    (void *)wasm_bedrock_receive,     "(*~*~)i",  NULL },
-        { "request",    (void *)wasm_bedrock_request,     "(*~*~)i",  NULL },
-        { "request_to", (void *)wasm_bedrock_request_to,  "(*~*~*~)i",NULL },
-        { "publish",    (void *)wasm_bedrock_publish,     "(*~*~)i",  NULL },
-        { "serve_recv", (void *)wasm_bedrock_serve_recv,  "(*~)i",    NULL },
-        { "serve_send", (void *)wasm_bedrock_serve_send,  "(*~)i",    NULL },
-        { "db_exec",    (void *)wasm_bedrock_db_exec,     "(*~)i",    NULL },
-        { "db_query",   (void *)wasm_bedrock_db_query,    "(*~*~)i",  NULL },
-    };
-    for (int i = 0; i < 10; i++) natives[i].attachment = &bedrock;
+    tcc_set_lib_path(s, "vendor/tcc");
+    tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
 
-    if (!wasm_runtime_register_natives("bedrock", natives, 10)) {
-        fprintf(stderr, "register_natives failed\n");
-        goto cleanup_wamr;
+    /* Suppress TCC warnings/errors to stderr via callback */
+    tcc_set_error_func(s, NULL, NULL);
+
+    /* Inject all bedrock symbols so den code can call them directly */
+    tcc_add_symbol(s, "bedrock_log", native_bedrock_log);
+    tcc_add_symbol(s, "bedrock_subscribe", native_bedrock_subscribe);
+    tcc_add_symbol(s, "bedrock_receive", native_bedrock_receive);
+    tcc_add_symbol(s, "bedrock_request", native_bedrock_request);
+    tcc_add_symbol(s, "bedrock_request_to", native_bedrock_request_to);
+    tcc_add_symbol(s, "bedrock_publish", native_bedrock_publish);
+    tcc_add_symbol(s, "bedrock_serve_recv", native_bedrock_serve_recv);
+    tcc_add_symbol(s, "bedrock_serve_send", native_bedrock_serve_send);
+    tcc_add_symbol(s, "bedrock_db_exec", native_bedrock_db_exec);
+    tcc_add_symbol(s, "bedrock_db_query", native_bedrock_db_query);
+
+    /* Compile the C source */
+    if (tcc_compile_string(s, def->c_source) == -1) {
+        fprintf(stderr, "[native] compilation failed for den '%s'\n", def->name);
+        goto cleanup_tcc;
     }
 
-    unsigned char *wasm_copy = malloc(def->wasm_len);
-    if (!wasm_copy) goto cleanup_wamr;
-    memcpy(wasm_copy, def->wasm_buf, def->wasm_len);
-
-    wasm_module_t module = wasm_runtime_load(wasm_copy, (uint32_t)def->wasm_len,
-                                             err, sizeof(err));
-    if (!module) {
-        fprintf(stderr, "wasm_runtime_load: %s\n", err);
-        free(wasm_copy);
-        goto cleanup_wamr;
+    if (tcc_relocate(s) < 0) {
+        fprintf(stderr, "[native] relocate failed for den '%s'\n", def->name);
+        goto cleanup_tcc;
     }
 
-    wasm_module_inst_t inst = wasm_runtime_instantiate(module, 16384, 16384,
-                                                       err, sizeof(err));
-    if (!inst) {
-        fprintf(stderr, "wasm_runtime_instantiate: %s\n", err);
-        goto cleanup_module;
-    }
-
-    wasm_exec_env_t exec_env = wasm_runtime_create_exec_env(inst, 16384);
-    if (!exec_env) goto cleanup_inst;
-
-    /* Try serve() first (long-lived strata), fall back to on_event */
-    wasm_function_inst_t func = wasm_runtime_lookup_function(inst, "serve");
-    if (func) {
-        wasm_runtime_call_wasm(exec_env, func, 0, NULL);
+    /* Try serve() first (long-lived den), fall back to on_event */
+    void (*serve_fn)(void) = tcc_get_symbol(s, "serve");
+    if (serve_fn) {
+        serve_fn();
     } else {
-        func = wasm_runtime_lookup_function(inst, "on_event");
-        if (!func) {
-            fprintf(stderr, "no serve() or on_event() in WASM module\n");
-            goto cleanup_env;
+        void (*on_event_fn)(const char *, int) = tcc_get_symbol(s, "on_event");
+        if (on_event_fn) {
+            on_event_fn(event_json, event_len);
+        } else {
+            fprintf(stderr, "[native] no serve() or on_event() in den '%s'\n",
+                    def->name);
         }
-        void *native_ptr = NULL;
-        uint32_t wasm_ptr = wasm_runtime_module_malloc(inst, event_len, &native_ptr);
-        if (!wasm_ptr) goto cleanup_env;
-        memcpy(native_ptr, event_json, event_len);
-
-        uint32_t argv[2] = { wasm_ptr, (uint32_t)event_len };
-        if (!wasm_runtime_call_wasm(exec_env, func, 2, argv)) {
-            const char *exc = wasm_runtime_get_exception(inst);
-            fprintf(stderr, "on_event failed: %s\n", exc ? exc : "unknown");
-        }
-        wasm_runtime_module_free(inst, wasm_ptr);
     }
 
-cleanup_env:
-    wasm_runtime_destroy_exec_env(exec_env);
-cleanup_inst:
-    wasm_runtime_deinstantiate(inst);
-cleanup_module:
-    wasm_runtime_unload(module);
-    free(wasm_copy);
-cleanup_wamr:
-    wasm_runtime_destroy();
+cleanup_tcc:
+    tcc_delete(s);
 cleanup:
     local_db_save(&bedrock);
     bedrock_teardown(&bedrock);
@@ -973,7 +920,7 @@ pid_t strata_den_spawn(strata_den_host *host,
         if (local_def.mode == STRATA_MODE_JS)
             js_child_run(&local_def, event_json, event_len);
         else
-            wasm_child_run(&local_def, event_json, event_len);
+            native_child_run(&local_def, event_json, event_len);
         _exit(0);
     }
 
@@ -999,24 +946,23 @@ const strata_den_def *strata_den_host_find(const strata_den_host *host,
     return NULL;
 }
 
-int strata_den_register_wasm_buf(strata_den_host *host,
-                                    const char *name,
-                                    const unsigned char *wasm_buf, size_t wasm_len,
-                                    const char *sub_endpoint,
-                                    const char *req_endpoint) {
-    if (!host || !name || !wasm_buf || host->den_count >= STRATA_MAX_DENS) return -1;
+int strata_den_register_native_buf(strata_den_host *host,
+                                     const char *name,
+                                     const char *c_source, size_t c_len,
+                                     const char *sub_endpoint,
+                                     const char *req_endpoint) {
+    if (!host || !name || !c_source || host->den_count >= STRATA_MAX_DENS) return -1;
 
     strata_den_def *def = &host->dens[host->den_count];
     memset(def, 0, sizeof(*def));
-    def->mode = STRATA_MODE_WASM;
+    def->mode = STRATA_MODE_NATIVE;
     strncpy(def->name, name, sizeof(def->name) - 1);
     if (sub_endpoint) strncpy(def->sub_endpoint, sub_endpoint, sizeof(def->sub_endpoint) - 1);
     if (req_endpoint) strncpy(def->req_endpoint, req_endpoint, sizeof(def->req_endpoint) - 1);
 
-    def->wasm_buf = malloc(wasm_len);
-    if (!def->wasm_buf) return -1;
-    memcpy(def->wasm_buf, wasm_buf, wasm_len);
-    def->wasm_len = wasm_len;
+    def->c_source = strndup(c_source, c_len);
+    if (!def->c_source) return -1;
+    def->c_source_len = c_len;
 
     host->den_count++;
     return 0;
