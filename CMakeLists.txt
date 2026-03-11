@@ -103,9 +103,9 @@ add_library(strata
 )
 target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN)
 target_include_directories(strata PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/vendor/quickjs
-    ${CMAKE_SOURCE_DIR}/vendor/tcc
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/quickjs
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
 )
@@ -117,7 +117,7 @@ endif()
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)
 target_include_directories(store_service_lib PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
 )
@@ -125,7 +125,7 @@ target_compile_definitions(store_service_lib PRIVATE STORE_SERVICE_NO_MAIN)
 
 add_executable(store_service src/store_service.c)
 target_include_directories(store_service PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
 )
@@ -144,11 +144,11 @@ add_test(NAME test_change COMMAND test_change)
 
 add_executable(test_den test/test_den.c)
 target_link_libraries(test_den strata)
-add_test(NAME test_den COMMAND test_den WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_den COMMAND test_den WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(test_board test/test_board.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_board strata)
-add_test(NAME test_board COMMAND test_board WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_board COMMAND test_board WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(test_blob test/test_blob.c)
 target_link_libraries(test_blob strata)
@@ -156,27 +156,27 @@ add_test(NAME test_blob COMMAND test_blob)
 
 add_executable(test_village test/test_village.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_village strata)
-add_test(NAME test_village COMMAND test_village WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_village COMMAND test_village WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(test_claude_homestead test/test_claude_homestead.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_claude_homestead strata)
-add_test(NAME test_claude_homestead COMMAND test_claude_homestead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_claude_homestead COMMAND test_claude_homestead WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(test_collaboration test/test_collaboration.c $<TARGET_OBJECTS:store_service_lib>)
 target_link_libraries(test_collaboration strata)
-add_test(NAME test_collaboration COMMAND test_collaboration WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_collaboration COMMAND test_collaboration WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Code-smith vocation service
 add_library(code_smith_lib OBJECT src/code_smith.c)
 target_include_directories(code_smith_lib PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
 target_compile_definitions(code_smith_lib PRIVATE CODE_SMITH_NO_MAIN)
 
 add_executable(code_smith src/code_smith.c)
 target_include_directories(code_smith PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(code_smith ${ZMQ_LIBRARY})
@@ -184,16 +184,16 @@ target_link_libraries(code_smith ${ZMQ_LIBRARY})
 # Cobbler vocation (C source validator via vendored TCC)
 add_library(cobbler_lib OBJECT src/cobbler.c)
 target_include_directories(cobbler_lib PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/vendor/tcc
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${ZMQ_INCLUDE_DIR}
 )
 target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN)
 
 add_executable(cobbler src/cobbler.c)
 target_include_directories(cobbler PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/vendor/tcc
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(cobbler ${ZMQ_LIBRARY} tcc)
@@ -201,7 +201,7 @@ target_link_libraries(cobbler ${ZMQ_LIBRARY} tcc)
 # Messenger vocation (HTTP client via vendored libcurl)
 add_library(messenger_lib OBJECT src/messenger.c)
 target_include_directories(messenger_lib PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(messenger_lib libcurl_static)
@@ -209,7 +209,7 @@ target_compile_definitions(messenger_lib PRIVATE MESSENGER_NO_MAIN)
 
 add_executable(messenger src/messenger.c)
 target_include_directories(messenger PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(messenger ${ZMQ_LIBRARY} libcurl_static)
@@ -217,7 +217,7 @@ target_link_libraries(messenger ${ZMQ_LIBRARY} libcurl_static)
 # Village daemon
 add_executable(village_daemon src/village.c)
 target_include_directories(village_daemon PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(village_daemon strata)
@@ -251,30 +251,30 @@ target_link_libraries(warren_village strata libcurl_static tcc)
 # Cobbler test
 add_executable(test_cobbler test/test_cobbler.c $<TARGET_OBJECTS:cobbler_lib>)
 target_include_directories(test_cobbler PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/vendor/tcc
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(test_cobbler ${ZMQ_LIBRARY} tcc)
-add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Messenger test
 add_executable(test_messenger test/test_messenger.c $<TARGET_OBJECTS:messenger_lib>)
 target_include_directories(test_messenger PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(test_messenger ${ZMQ_LIBRARY} libcurl_static)
-add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Claude den test
 add_executable(test_claude test/test_claude.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:messenger_lib>)
 target_include_directories(test_claude PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(test_claude strata libcurl_static)
-add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Examples
 add_executable(listener examples/listener.c)

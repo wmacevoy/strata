@@ -21,7 +21,9 @@ var CONFIG = {
     smith_ep: "",
     cobbler_ep: "",
     model: "claude-sonnet-4-6",
-    max_tokens: 4096
+    max_tokens: 4096,
+    system_prompt: "",
+    identity_path: ""
 };
 
 try {
@@ -32,9 +34,31 @@ try {
         if (ev.cobbler_ep) CONFIG.cobbler_ep = ev.cobbler_ep;
         if (ev.model) CONFIG.model = ev.model;
         if (ev.max_tokens) CONFIG.max_tokens = ev.max_tokens;
+        if (ev.system_prompt) CONFIG.system_prompt = ev.system_prompt;
+        if (ev.identity_path) CONFIG.identity_path = ev.identity_path;
+        if (ev.name) NAME = ev.name;
+        if (ev.entity) ENTITY = ev.entity;
     }
 } catch (e) {
     bedrock.log(NAME + " config parse error: " + e.message);
+}
+
+// Load identity from file if path given (via code-smith)
+if (CONFIG.identity_path && CONFIG.smith_ep && !CONFIG.system_prompt) {
+    try {
+        var id_resp = bedrock.request(
+            JSON.stringify({action: "read", path: CONFIG.identity_path}),
+            CONFIG.smith_ep);
+        if (id_resp) {
+            var id_data = JSON.parse(id_resp);
+            if (id_data.ok && id_data.content) {
+                CONFIG.system_prompt = id_data.content;
+                bedrock.log(NAME + " loaded identity from " + CONFIG.identity_path);
+            }
+        }
+    } catch (e) {
+        bedrock.log(NAME + " failed to load identity: " + e.message);
+    }
 }
 
 // --- Local DB setup ---
@@ -257,12 +281,16 @@ function call_claude(messages) {
         }
     }
 
-    var api_body = JSON.stringify({
+    var api_payload = {
         model: CONFIG.model,
         max_tokens: CONFIG.max_tokens,
         messages: messages,
         tools: available_tools
-    });
+    };
+    if (CONFIG.system_prompt) {
+        api_payload.system = CONFIG.system_prompt;
+    }
+    var api_body = JSON.stringify(api_payload);
 
     var fetch_req = JSON.stringify({
         action: "fetch",
