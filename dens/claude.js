@@ -23,7 +23,8 @@ var CONFIG = {
     model: "claude-sonnet-4-6",
     max_tokens: 4096,
     system_prompt: "",
-    identity_path: ""
+    identity_path: "",
+    api_key: ""
 };
 
 try {
@@ -36,6 +37,7 @@ try {
         if (ev.max_tokens) CONFIG.max_tokens = ev.max_tokens;
         if (ev.system_prompt) CONFIG.system_prompt = ev.system_prompt;
         if (ev.identity_path) CONFIG.identity_path = ev.identity_path;
+        if (ev.api_key) CONFIG.api_key = ev.api_key;
         if (ev.name) NAME = ev.name;
         if (ev.entity) ENTITY = ev.entity;
     }
@@ -248,9 +250,9 @@ function call_claude(messages) {
         return {ok: false, error: "messenger endpoint not configured"};
     }
 
-    var api_key = "";
-    // Try to read API key from environment via code-smith exec
-    if (CONFIG.smith_ep) {
+    var api_key = CONFIG.api_key || "";
+    // Fall back to reading API key from environment via code-smith exec
+    if (!api_key && CONFIG.smith_ep) {
         var key_resp = bedrock.request(
             JSON.stringify({action: "exec", cmd: "echo $ANTHROPIC_API_KEY"}),
             CONFIG.smith_ep);
