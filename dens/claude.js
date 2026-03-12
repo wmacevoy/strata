@@ -23,8 +23,7 @@ var CONFIG = {
     model: "claude-sonnet-4-6",
     max_tokens: 4096,
     system_prompt: "",
-    identity_path: "",
-    api_key: ""
+    identity_path: ""
 };
 
 try {
@@ -37,7 +36,6 @@ try {
         if (ev.max_tokens) CONFIG.max_tokens = ev.max_tokens;
         if (ev.system_prompt) CONFIG.system_prompt = ev.system_prompt;
         if (ev.identity_path) CONFIG.identity_path = ev.identity_path;
-        if (ev.api_key) CONFIG.api_key = ev.api_key;
         if (ev.name) NAME = ev.name;
         if (ev.entity) ENTITY = ev.entity;
     }
@@ -250,21 +248,8 @@ function call_claude(messages) {
         return {ok: false, error: "messenger endpoint not configured"};
     }
 
-    var api_key = CONFIG.api_key || "";
-    // Fall back to reading API key from environment via code-smith exec
-    if (!api_key && CONFIG.smith_ep) {
-        var key_resp = bedrock.request(
-            JSON.stringify({action: "exec", cmd: "echo $ANTHROPIC_API_KEY"}),
-            CONFIG.smith_ep);
-        if (key_resp) {
-            try {
-                var kr = JSON.parse(key_resp);
-                if (kr.ok && kr.stdout) {
-                    api_key = kr.stdout.replace(/\n/g, "").replace(/\r/g, "");
-                }
-            } catch (e) { /* ignore */ }
-        }
-    }
+    // API key lives in the den's own memory — provisioned via "configure" action
+    var api_key = db_get_memory("api_key") || "";
 
     if (!api_key) {
         return {ok: false, error: "ANTHROPIC_API_KEY not set"};
@@ -422,7 +407,27 @@ function handle_forget() {
     return {ok: true, message: "conversation history cleared, memory retained"};
 }
 
+function handle_configure(req) {
+    var changed = [];
+    if (req.api_key) {
+        db_set_memory("api_key", req.api_key);
+        changed.push("api_key");
+    }
+    if (req.model) {
+        CONFIG.model = req.model;
+        db_set_memory("model", req.model);
+        changed.push("model");
+    }
+    if (changed.length === 0)
+        return {ok: false, error: "nothing to configure (supported: api_key, model)"};
+    return {ok: true, configured: changed};
+}
+
 // --- Main ---
+
+// Restore persisted config from den memory
+var _saved_model = db_get_memory("model");
+if (_saved_model) CONFIG.model = _saved_model;
 
 bedrock.log(NAME + " waking up");
 
@@ -449,6 +454,8 @@ while (MAX_REQUESTS === 0 || count < MAX_REQUESTS) {
             response = JSON.stringify(handle_memory(req));
         } else if (req.action === "forget") {
             response = JSON.stringify(handle_forget());
+        } else if (req.action === "configure") {
+            response = JSON.stringify(handle_configure(req));
         } else {
             response = JSON.stringify({ok: false, error: "unknown action: " + req.action});
         }
