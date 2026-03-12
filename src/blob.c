@@ -12,9 +12,118 @@
 typedef unsigned int CC_LONG;
 #endif
 #include "strata/blob.h"
+#include "strata/aead.h"
 #include "strata/context.h"
 
 extern sqlite3 *strata_store_get_db(strata_store *store);
+extern const strata_aead_key *strata_store_get_key(const strata_store *store);
+
+/* Build AAD from sorted tags: "tag1\0tag2\0tag3\0" */
+static uint8_t *build_aad(const char **tags, int ntags, size_t *aad_len) {
+    size_t total = 0;
+    for (int i = 0; i < ntags; i++)
+        total += strlen(tags[i]) + 1;
+    if (total == 0) { *aad_len = 0; return NULL; }
+    uint8_t *aad = malloc(total);
+    if (!aad) { *aad_len = 0; return NULL; }
+    size_t pos = 0;
+    for (int i = 0; i < ntags; i++) {
+        size_t tlen = strlen(tags[i]);
+        memcpy(aad + pos, tags[i], tlen + 1);
+        pos += tlen + 1;
+    }
+    *aad_len = total;
+    return aad;
+}
+
+/* Encrypt blob content if key is set. Caller must free returned buffer.
+ * If no key, returns a copy of the input. */
+static uint8_t *maybe_encrypt(strata_store *store,
+                               const void *content, size_t content_len,
+                               const char **tags, int ntags,
+                               size_t *out_len) {
+    const strata_aead_key *master = strata_store_get_key(store);
+    if (!master) {
+        uint8_t *copy = malloc(content_len);
+        if (copy) memcpy(copy, content, content_len);
+        *out_len = content_len;
+        return copy;
+    }
+
+    /* Derive per-blob key from first tag (primary identity) */
+    strata_aead_key derived;
+    const char *key_info = (ntags > 0 && tags[0]) ? tags[0] : "blob";
+    strata_aead_derive(master, key_info, &derived);
+
+    /* Build AAD from all tags */
+    size_t aad_len = 0;
+    uint8_t *aad = build_aad(tags, ntags, &aad_len);
+
+    size_t enc_len = content_len + STRATA_OVERHEAD;
+    uint8_t *enc = malloc(enc_len);
+    if (!enc) { free(aad); *out_len = 0; return NULL; }
+
+    if (strata_aead_seal(&derived, content, content_len,
+                          aad, aad_len, enc, &enc_len) != 0) {
+        free(enc); free(aad); *out_len = 0; return NULL;
+    }
+    free(aad);
+    *out_len = enc_len;
+    return enc;
+}
+
+/* Decrypt blob content if it's sealed. Caller must free returned buffer. */
+static uint8_t *maybe_decrypt(strata_store *store,
+                               const void *content, size_t content_len,
+                               const char *blob_id,
+                               size_t *out_len) {
+    if (!strata_aead_is_sealed(content, content_len)) {
+        uint8_t *copy = malloc(content_len);
+        if (copy) memcpy(copy, content, content_len);
+        *out_len = content_len;
+        return copy;
+    }
+
+    const strata_aead_key *master = strata_store_get_key(store);
+    if (!master) {
+        /* Sealed but no key — can't decrypt */
+        *out_len = 0;
+        return NULL;
+    }
+
+    /* Need to find tags for this blob to reconstruct AAD and derive key */
+    sqlite3 *db = strata_store_get_db(store);
+    if (!db) { *out_len = 0; return NULL; }
+
+    char **tags = NULL;
+    int ntags = 0;
+    strata_blob_tags(store, blob_id, &tags, &ntags);
+
+    /* Derive key from first tag */
+    strata_aead_key derived;
+    const char *key_info = (ntags > 0 && tags[0]) ? tags[0] : "blob";
+    strata_aead_derive(master, key_info, &derived);
+
+    /* Build AAD from all tags */
+    size_t aad_len = 0;
+    uint8_t *aad = build_aad((const char **)tags, ntags, &aad_len);
+
+    size_t dec_len = content_len;
+    uint8_t *dec = malloc(dec_len);
+    if (!dec) { free(aad); strata_blob_free_tags(tags, ntags); *out_len = 0; return NULL; }
+
+    if (strata_aead_open(&derived, content, content_len,
+                          aad, aad_len, dec, &dec_len) != 0) {
+        free(dec); free(aad); strata_blob_free_tags(tags, ntags);
+        *out_len = 0;
+        return NULL;
+    }
+
+    free(aad);
+    strata_blob_free_tags(tags, ntags);
+    *out_len = dec_len;
+    return dec;
+}
 
 static const char *BLOB_SCHEMA =
     "CREATE TABLE IF NOT EXISTS blobs ("
@@ -78,6 +187,7 @@ int strata_blob_put(strata_store *store, strata_ctx *ctx,
     sqlite3 *db = strata_store_get_db(store);
     if (!db || blob_ensure_schema(db) != 0) return -1;
 
+    /* blob_id is hash of plaintext (preserves content-addressing) */
     char hash[65];
     sha256_hex(content, content_len, hash);
 
@@ -86,17 +196,27 @@ int strata_blob_put(strata_store *store, strata_ctx *ctx,
 
     const char *entity = strata_ctx_entity_id(ctx);
 
+    /* Encrypt if bedrock key is set */
+    size_t store_len = 0;
+    uint8_t *store_content = maybe_encrypt(store, content, content_len,
+                                            tags, ntags, &store_len);
+    if (!store_content) return -1;
+
     /* Insert blob */
     sqlite3_stmt *stmt = NULL;
     const char *sql = "INSERT OR IGNORE INTO blobs (blob_id, content, author, created_at) "
                       "VALUES (?, ?, ?, ?)";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        free(store_content);
+        return -1;
+    }
     sqlite3_bind_text(stmt, 1, hash, -1, SQLITE_STATIC);
-    sqlite3_bind_blob(stmt, 2, content, (int)content_len, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 2, store_content, (int)store_len, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, entity, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, ts, -1, SQLITE_STATIC);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+    free(store_content);
 
     /* Insert tags */
     for (int i = 0; i < ntags; i++) {
@@ -154,14 +274,14 @@ int strata_blob_get(strata_store *store, strata_ctx *ctx,
 
     const void *blob = sqlite3_column_blob(stmt, 3);
     int blob_len = sqlite3_column_bytes(stmt, 3);
-    out->content = malloc(blob_len);
-    if (out->content) {
-        memcpy(out->content, blob, blob_len);
-        out->content_len = blob_len;
-    }
-
     sqlite3_finalize(stmt);
-    return 0;
+
+    /* Decrypt if sealed */
+    size_t dec_len = 0;
+    out->content = maybe_decrypt(store, blob, blob_len, out->blob_id, &dec_len);
+    out->content_len = dec_len;
+
+    return out->content ? 0 : -1;
 }
 
 int strata_blob_find(strata_store *store, strata_ctx *ctx,
@@ -225,11 +345,11 @@ int strata_blob_find(strata_store *store, strata_ctx *ctx,
 
         const void *blob = sqlite3_column_blob(stmt, 3);
         int blob_len = sqlite3_column_bytes(stmt, 3);
-        b.content = malloc(blob_len);
-        if (b.content) {
-            memcpy(b.content, blob, blob_len);
-            b.content_len = blob_len;
-        }
+
+        /* Decrypt if sealed */
+        size_t dec_len = 0;
+        b.content = maybe_decrypt(store, blob, blob_len, b.blob_id, &dec_len);
+        b.content_len = dec_len;
 
         int keep = cb(&b, userdata);
         free(b.content);

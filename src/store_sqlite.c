@@ -22,6 +22,8 @@ typedef unsigned int CC_LONG;
 struct strata_store {
     sqlite3 *db;
     strata_change_pub *change_pub;
+    strata_aead_key bedrock_key;
+    int has_key;
 };
 
 /* Expose db handle for context.c */
@@ -437,4 +439,15 @@ int strata_entity_authenticate(strata_store *store, const char *entity_id,
     int valid = (sqlite3_step(stmt) == SQLITE_ROW) ? 1 : 0;
     sqlite3_finalize(stmt);
     return valid;
+}
+
+void strata_store_set_key(strata_store *store, const strata_aead_key *key) {
+    if (!store || !key) return;
+    memcpy(&store->bedrock_key, key, sizeof(strata_aead_key));
+    store->has_key = 1;
+}
+
+const strata_aead_key *strata_store_get_key(const strata_store *store) {
+    if (!store || !store->has_key) return NULL;
+    return &store->bedrock_key;
 }

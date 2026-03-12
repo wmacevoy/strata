@@ -385,6 +385,13 @@ int store_service_run(const char *db_path, const char *endpoint) {
     if (!store) { fprintf(stderr, "failed to open store\n"); return 1; }
     strata_store_init(store);
 
+    /* Load bedrock key for AEAD encryption at rest */
+    strata_aead_key bedrock_key;
+    if (strata_aead_key_from_env(&bedrock_key) == 0) {
+        strata_store_set_key(store, &bedrock_key);
+        fprintf(stderr, "store_service: AEAD encryption enabled\n");
+    }
+
     void *zmq_ctx = zmq_ctx_new();
     void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
     zmq_bind(rep, endpoint);

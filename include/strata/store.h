@@ -2,6 +2,7 @@
 #define STRATA_STORE_H
 
 #include <stddef.h>
+#include "strata/aead.h"
 
 typedef struct strata_store strata_store;
 typedef struct strata_ctx strata_ctx;
@@ -65,5 +66,11 @@ int strata_entity_register(strata_store *store, const char *entity_id,
                             char *out_token);
 int strata_entity_authenticate(strata_store *store, const char *entity_id,
                                 const char *token);
+
+/* Set the bedrock key for AEAD encryption at rest.
+ * If set, all blob content is encrypted before storage and
+ * decrypted on retrieval. Tags serve as AAD. */
+void strata_store_set_key(strata_store *store, const strata_aead_key *key);
+const strata_aead_key *strata_store_get_key(const strata_store *store);
 
 #endif

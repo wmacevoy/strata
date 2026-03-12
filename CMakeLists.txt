@@ -64,10 +64,16 @@ endif()
 add_subdirectory(vendor/curl EXCLUDE_FROM_ALL)
 target_compile_options(libcurl_static PRIVATE -w)
 
-# OpenSSL (needed on Linux for SHA-256; macOS uses CommonCrypto)
-if(NOT APPLE)
-    find_package(OpenSSL REQUIRED)
+# OpenSSL (needed for SHA-256 and AEAD encryption)
+if(APPLE)
+    execute_process(
+        COMMAND brew --prefix openssl
+        OUTPUT_VARIABLE OPENSSL_ROOT_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    set(OPENSSL_ROOT_DIR "${OPENSSL_ROOT_DIR}" CACHE PATH "OpenSSL root")
 endif()
+find_package(OpenSSL REQUIRED)
 
 # QuickJS (vendored)
 add_library(quickjs
@@ -99,6 +105,7 @@ add_library(strata
     src/den.c
     src/sandbox.c
     src/blob.c
+    src/aead.c
     src/village.c
 )
 target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN)
@@ -109,10 +116,7 @@ target_include_directories(strata PUBLIC
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(strata quickjs tcc ${SQLITE3_LIBRARY} ${ZMQ_LIBRARY})
-if(NOT APPLE)
-    target_link_libraries(strata OpenSSL::Crypto)
-endif()
+target_link_libraries(strata quickjs tcc ${SQLITE3_LIBRARY} ${ZMQ_LIBRARY} OpenSSL::Crypto)
 
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)
