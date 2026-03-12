@@ -4,24 +4,10 @@ project(strata C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# macOS Homebrew paths
-if(APPLE)
-    execute_process(
-        COMMAND brew --prefix
-        OUTPUT_VARIABLE HOMEBREW_PREFIX
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    list(APPEND CMAKE_PREFIX_PATH
-        "${HOMEBREW_PREFIX}/opt/sqlite"
-    )
-endif()
-
-# SQLite
-find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
-find_library(SQLITE3_LIBRARY sqlite3)
-if(NOT SQLITE3_INCLUDE_DIR OR NOT SQLITE3_LIBRARY)
-    message(FATAL_ERROR "SQLite3 not found")
-endif()
+# SQLite (vendored — amalgamation)
+add_subdirectory(vendor/sqlite EXCLUDE_FROM_ALL)
+set(SQLITE3_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/sqlite")
+set(SQLITE3_LIBRARY sqlite3_static)
 
 # ZeroMQ (vendored — static build)
 # CURVE disabled: transport encryption uses message-level AEAD (XChaCha20-Poly1305)
