@@ -3,14 +3,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <sqlite3.h>
-#ifdef __APPLE__
-#include <CommonCrypto/CommonDigest.h>
-#else
-#include <openssl/sha.h>
-#define CC_SHA256_DIGEST_LENGTH SHA256_DIGEST_LENGTH
-#define CC_SHA256(data, len, hash) SHA256((const unsigned char *)(data), (len), (hash))
-typedef unsigned int CC_LONG;
-#endif
+#include <sodium/crypto_hash_sha256.h>
 #include "strata/blob.h"
 #include "strata/aead.h"
 #include "strata/context.h"
@@ -164,9 +157,9 @@ static int blob_ensure_schema(sqlite3 *db) {
 }
 
 static void sha256_hex(const void *data, size_t len, char out[65]) {
-    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data, (CC_LONG)len, hash);
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++)
+    unsigned char hash[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(hash, (const unsigned char *)data, len);
+    for (int i = 0; i < crypto_hash_sha256_BYTES; i++)
         sprintf(out + i * 2, "%02x", hash[i]);
     out[64] = '\0';
 }
@@ -274,11 +267,17 @@ int strata_blob_get(strata_store *store, strata_ctx *ctx,
 
     const void *blob = sqlite3_column_blob(stmt, 3);
     int blob_len = sqlite3_column_bytes(stmt, 3);
+
+    /* Copy blob before finalize — sqlite3_column_blob is invalidated by finalize */
+    void *blob_copy = malloc(blob_len);
+    if (!blob_copy) { sqlite3_finalize(stmt); return -1; }
+    memcpy(blob_copy, blob, blob_len);
     sqlite3_finalize(stmt);
 
     /* Decrypt if sealed */
     size_t dec_len = 0;
-    out->content = maybe_decrypt(store, blob, blob_len, out->blob_id, &dec_len);
+    out->content = maybe_decrypt(store, blob_copy, blob_len, out->blob_id, &dec_len);
+    free(blob_copy);
     out->content_len = dec_len;
 
     return out->content ? 0 : -1;

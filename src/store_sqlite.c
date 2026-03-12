@@ -9,15 +9,7 @@
 #include "strata/schema.h"
 #include "strata/change.h"
 
-/* SHA-256 - CommonCrypto on macOS, OpenSSL on Linux */
-#ifdef __APPLE__
-#include <CommonCrypto/CommonDigest.h>
-#else
-#include <openssl/sha.h>
-#define CC_SHA256_DIGEST_LENGTH SHA256_DIGEST_LENGTH
-#define CC_SHA256(data, len, hash) SHA256((const unsigned char *)(data), (len), (hash))
-typedef unsigned int CC_LONG;
-#endif
+#include <sodium/crypto_hash_sha256.h>
 
 struct strata_store {
     sqlite3 *db;
@@ -32,9 +24,9 @@ sqlite3 *strata_store_get_db(strata_store *store) {
 }
 
 static void sha256_hex(const void *data, size_t len, char out[65]) {
-    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data, (CC_LONG)len, hash);
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++)
+    unsigned char hash[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(hash, (const unsigned char *)data, len);
+    for (int i = 0; i < crypto_hash_sha256_BYTES; i++)
         sprintf(out + i * 2, "%02x", hash[i]);
     out[64] = '\0';
 }

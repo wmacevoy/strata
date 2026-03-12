@@ -16,6 +16,7 @@
 #include <getopt.h>
 #include <pthread.h>
 #include <zmq.h>
+#include "strata/aead.h"
 #include "strata/json_util.h"
 
 static volatile int running = 1;
@@ -57,9 +58,9 @@ static const char *agent_lookup(const char *name) {
 
 static int zmq_do_request(void *req_sock, const char *request,
                           char *resp, int resp_cap) {
-    int rc = zmq_send(req_sock, request, strlen(request), 0);
+    int rc = strata_zmq_send(req_sock, request, strlen(request), 0);
     if (rc < 0) return -1;
-    rc = zmq_recv(req_sock, resp, resp_cap - 1, 0);
+    rc = strata_zmq_recv(req_sock, resp, resp_cap - 1, 0);
     if (rc < 0) return -1;
     resp[rc] = '\0';
     return rc;

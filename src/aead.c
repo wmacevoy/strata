@@ -1,9 +1,7 @@
 /*
- * AEAD encryption for strata — AES-256-GCM with tagged AAD.
+ * AEAD encryption for strata — XChaCha20-Poly1305 via libsodium.
  *
- * Wire format: "AE01" (4) || nonce (12) || ciphertext (N) || gcm_tag (16)
- *
- * Uses OpenSSL EVP on all platforms.
+ * Wire format: "AE02" (4) || nonce (24) || ciphertext+tag (N+16)
  */
 
 #include <string.h>
@@ -12,12 +10,22 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/hmac.h>
+#include <sodium.h>
+#include <zmq.h>
 #include "strata/aead.h"
 
-static const uint8_t AEAD_MAGIC[4] = {'A', 'E', '0', '1'};
+static const uint8_t AEAD_MAGIC[4] = {'A', 'E', '0', '2'};
+
+static void ensure_sodium_init(void) {
+    static int done = 0;
+    if (!done) {
+        if (sodium_init() < 0) {
+            fprintf(stderr, "strata: sodium_init() failed\n");
+            abort();
+        }
+        done = 1;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Key lifecycle                                                      */
@@ -25,7 +33,9 @@ static const uint8_t AEAD_MAGIC[4] = {'A', 'E', '0', '1'};
 
 int strata_aead_keygen(strata_aead_key *key) {
     if (!key) return -1;
-    return (RAND_bytes(key->bytes, STRATA_KEY_LEN) == 1) ? 0 : -1;
+    ensure_sodium_init();
+    randombytes_buf(key->bytes, STRATA_KEY_LEN);
+    return 0;
 }
 
 static int hex_to_byte(char c) {
@@ -93,31 +103,26 @@ int strata_aead_derive(const strata_aead_key *master,
                        const char *info,
                        strata_aead_key *derived) {
     if (!master || !info || !derived) return -1;
+    ensure_sodium_init();
 
-    /* HKDF extract: PRK = HMAC-SHA256(salt="strata-aead", IKM=master) */
+    /* Extract: PRK = HMAC-SHA256(salt="strata-aead", IKM=master) */
     const char *salt = "strata-aead";
-    unsigned int prk_len = 32;
-    uint8_t prk[32];
-    HMAC(EVP_sha256(), salt, (int)strlen(salt),
-         master->bytes, STRATA_KEY_LEN, prk, &prk_len);
+    uint8_t prk[crypto_kdf_hkdf_sha256_KEYBYTES];
+    if (crypto_kdf_hkdf_sha256_extract(prk,
+            (const unsigned char *)salt, strlen(salt),
+            master->bytes, STRATA_KEY_LEN) != 0)
+        return -1;
 
-    /* HKDF expand: OKM = HMAC-SHA256(PRK, info || 0x01)
-     * We only need 32 bytes — one HMAC block. */
-    size_t info_len = strlen(info);
-    uint8_t *expand_input = malloc(info_len + 1);
-    if (!expand_input) return -1;
-    memcpy(expand_input, info, info_len);
-    expand_input[info_len] = 0x01;
+    /* Expand: OKM = HKDF-Expand(PRK, info, 32) */
+    if (crypto_kdf_hkdf_sha256_expand(derived->bytes, STRATA_KEY_LEN,
+            info, strlen(info), prk) != 0)
+        return -1;
 
-    unsigned int okm_len = 32;
-    HMAC(EVP_sha256(), prk, 32,
-         expand_input, info_len + 1, derived->bytes, &okm_len);
-    free(expand_input);
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/*  AES-256-GCM seal / open                                            */
+/*  XChaCha20-Poly1305 seal / open                                     */
 /* ------------------------------------------------------------------ */
 
 int strata_aead_seal(const strata_aead_key *key,
@@ -126,36 +131,25 @@ int strata_aead_seal(const strata_aead_key *key,
                      uint8_t *out, size_t *out_len) {
     if (!key || !out || !out_len) return -1;
     if (!plaintext && plaintext_len > 0) return -1;
+    ensure_sodium_init();
 
-    size_t total = STRATA_MAGIC_LEN + STRATA_NONCE_LEN + plaintext_len + STRATA_GCM_TAG_LEN;
-
-    /* Layout: magic(4) || nonce(12) || ciphertext(N) || tag(16) */
+    /* Layout: magic(4) || nonce(24) || ciphertext+tag(N+16) */
     uint8_t *magic = out;
     uint8_t *nonce = out + STRATA_MAGIC_LEN;
     uint8_t *ct    = nonce + STRATA_NONCE_LEN;
-    uint8_t *tag   = ct + plaintext_len;
 
     memcpy(magic, AEAD_MAGIC, STRATA_MAGIC_LEN);
-    if (RAND_bytes(nonce, STRATA_NONCE_LEN) != 1) return -1;
+    randombytes_buf(nonce, STRATA_NONCE_LEN);
 
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return -1;
-    int ok = 1;
-    int len;
+    unsigned long long clen = 0;
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+            ct, &clen,
+            plaintext, (unsigned long long)plaintext_len,
+            aad, (unsigned long long)aad_len,
+            NULL, nonce, key->bytes) != 0)
+        return -1;
 
-    ok = ok && EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
-    ok = ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, STRATA_NONCE_LEN, NULL);
-    ok = ok && EVP_EncryptInit_ex(ctx, NULL, NULL, key->bytes, nonce);
-    if (aad && aad_len > 0)
-        ok = ok && EVP_EncryptUpdate(ctx, NULL, &len, aad, (int)aad_len);
-    if (plaintext_len > 0)
-        ok = ok && EVP_EncryptUpdate(ctx, ct, &len, plaintext, (int)plaintext_len);
-    ok = ok && EVP_EncryptFinal_ex(ctx, ct + (plaintext_len > 0 ? (size_t)len : 0), &len);
-    ok = ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, STRATA_GCM_TAG_LEN, tag);
-    EVP_CIPHER_CTX_free(ctx);
-    if (!ok) return -1;
-
-    *out_len = total;
+    *out_len = STRATA_MAGIC_LEN + STRATA_NONCE_LEN + (size_t)clen;
     return 0;
 }
 
@@ -166,35 +160,90 @@ int strata_aead_open(const strata_aead_key *key,
     if (!key || !sealed || !out || !out_len) return -1;
     if (sealed_len < STRATA_OVERHEAD) return -1;
     if (memcmp(sealed, AEAD_MAGIC, STRATA_MAGIC_LEN) != 0) return -1;
+    ensure_sodium_init();
 
     const uint8_t *nonce = sealed + STRATA_MAGIC_LEN;
-    size_t ct_len = sealed_len - STRATA_OVERHEAD;
     const uint8_t *ct = nonce + STRATA_NONCE_LEN;
-    const uint8_t *tag = ct + ct_len;
+    size_t ct_len = sealed_len - STRATA_MAGIC_LEN - STRATA_NONCE_LEN;
 
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return -1;
-    int ok = 1;
-    int len;
+    unsigned long long mlen = 0;
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+            out, &mlen,
+            NULL,
+            ct, (unsigned long long)ct_len,
+            aad, (unsigned long long)aad_len,
+            nonce, key->bytes) != 0)
+        return -1;
 
-    ok = ok && EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
-    ok = ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, STRATA_NONCE_LEN, NULL);
-    ok = ok && EVP_DecryptInit_ex(ctx, NULL, NULL, key->bytes, nonce);
-    if (aad && aad_len > 0)
-        ok = ok && EVP_DecryptUpdate(ctx, NULL, &len, aad, (int)aad_len);
-    if (ct_len > 0)
-        ok = ok && EVP_DecryptUpdate(ctx, out, &len, ct, (int)ct_len);
-    ok = ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
-                                    STRATA_GCM_TAG_LEN, (void *)tag);
-    ok = ok && (EVP_DecryptFinal_ex(ctx, out + (ct_len > 0 ? (size_t)len : 0), &len) > 0);
-    EVP_CIPHER_CTX_free(ctx);
-    if (!ok) return -1;
-
-    *out_len = ct_len;
+    *out_len = (size_t)mlen;
     return 0;
 }
 
 int strata_aead_is_sealed(const uint8_t *data, size_t len) {
     if (!data || len < STRATA_OVERHEAD) return 0;
     return memcmp(data, AEAD_MAGIC, STRATA_MAGIC_LEN) == 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  ZMQ transport encryption (message-level AEAD)                      */
+/* ------------------------------------------------------------------ */
+
+static strata_aead_key g_transport_key;
+static int g_transport_key_init = 0;
+
+strata_aead_key *strata_transport_key(void) {
+    if (!g_transport_key_init) {
+        strata_aead_key bedrock;
+        if (strata_aead_key_from_env(&bedrock) != 0) return NULL;
+        strata_aead_derive(&bedrock, "zmq-transport", &g_transport_key);
+        g_transport_key_init = 1;
+    }
+    return &g_transport_key;
+}
+
+int strata_zmq_send(void *sock, const void *buf, size_t len, int flags) {
+    strata_aead_key *tk = strata_transport_key();
+    if (!tk) return zmq_send(sock, buf, len, flags);
+
+    size_t enc_len = len + STRATA_OVERHEAD;
+    uint8_t *enc = malloc(enc_len);
+    if (!enc) return -1;
+
+    if (strata_aead_seal(tk, buf, len, NULL, 0, enc, &enc_len) != 0) {
+        free(enc);
+        return -1;
+    }
+    int rc = zmq_send(sock, enc, enc_len, flags);
+    free(enc);
+    return rc;
+}
+
+int strata_zmq_recv(void *sock, void *buf, size_t len, int flags) {
+    /* Receive into a temp buffer large enough for the sealed message */
+    size_t tmp_len = len + STRATA_OVERHEAD;
+    uint8_t *tmp = malloc(tmp_len);
+    if (!tmp) return -1;
+
+    int rc = zmq_recv(sock, tmp, tmp_len, flags);
+    if (rc < 0) { free(tmp); return rc; }
+
+    /* If not sealed, return plaintext as-is (backward compatible) */
+    if (!strata_aead_is_sealed(tmp, rc)) {
+        if ((size_t)rc > len) rc = (int)len;
+        memcpy(buf, tmp, rc);
+        free(tmp);
+        return rc;
+    }
+
+    /* Decrypt */
+    strata_aead_key *tk = strata_transport_key();
+    if (!tk) { free(tmp); return -1; }
+
+    size_t dec_len = 0;
+    if (strata_aead_open(tk, tmp, rc, NULL, 0, buf, &dec_len) != 0) {
+        free(tmp);
+        return -1;
+    }
+    free(tmp);
+    return (int)dec_len;
 }

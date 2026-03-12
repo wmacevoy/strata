@@ -4,14 +4,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define STRATA_KEY_LEN     32   /* AES-256 */
-#define STRATA_NONCE_LEN   12   /* GCM standard */
-#define STRATA_GCM_TAG_LEN 16   /* GCM auth tag */
-#define STRATA_MAGIC_LEN    4   /* "AE01" version marker */
-#define STRATA_OVERHEAD    (STRATA_MAGIC_LEN + STRATA_NONCE_LEN + STRATA_GCM_TAG_LEN)
+#define STRATA_KEY_LEN     32   /* XChaCha20-Poly1305 */
+#define STRATA_NONCE_LEN   24   /* XChaCha20 extended nonce */
+#define STRATA_TAG_LEN     16   /* Poly1305 auth tag */
+#define STRATA_MAGIC_LEN    4   /* "AE02" version marker */
+#define STRATA_OVERHEAD    (STRATA_MAGIC_LEN + STRATA_NONCE_LEN + STRATA_TAG_LEN)
 
-/* Wire format: "AE01" (4) || nonce (12) || ciphertext (N) || gcm_tag (16)
- * Total overhead: 32 bytes.
+/* Wire format: "AE02" (4) || nonce (24) || ciphertext+tag (N+16)
+ * Total overhead: 44 bytes.
  * The magic header distinguishes encrypted from plaintext blobs. */
 
 typedef struct {
@@ -56,7 +56,7 @@ int strata_aead_open(const strata_aead_key *key,
                      const uint8_t *aad, size_t aad_len,
                      uint8_t *out, size_t *out_len);
 
-/* Check if data starts with the AEAD magic header ("AE01"). */
+/* Check if data starts with the AEAD magic header ("AE02"). */
 int strata_aead_is_sealed(const uint8_t *data, size_t len);
 
 /* Load bedrock key from environment:
@@ -64,5 +64,20 @@ int strata_aead_is_sealed(const uint8_t *data, size_t len);
  *   STRATA_BEDROCK_KEY_FILE — path to raw 32-byte file
  * Returns 0 on success, -1 if neither is set. */
 int strata_aead_key_from_env(strata_aead_key *key);
+
+/* ------------------------------------------------------------------ */
+/*  ZMQ transport encryption (message-level AEAD)                      */
+/* ------------------------------------------------------------------ */
+
+/* Derive a transport key from bedrock. Returns NULL if no bedrock key. */
+strata_aead_key *strata_transport_key(void);
+
+/* Encrypted zmq_send: seals message with AEAD before sending.
+ * Falls back to plain send if no transport key. */
+int strata_zmq_send(void *sock, const void *buf, size_t len, int flags);
+
+/* Encrypted zmq_recv: receives and opens AEAD message.
+ * Falls back to plain recv if message has no AEAD header. */
+int strata_zmq_recv(void *sock, void *buf, size_t len, int flags);
 
 #endif

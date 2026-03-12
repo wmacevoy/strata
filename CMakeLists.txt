@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(strata C)
+project(strata C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -13,7 +13,6 @@ if(APPLE)
     )
     list(APPEND CMAKE_PREFIX_PATH
         "${HOMEBREW_PREFIX}/opt/sqlite"
-        "${HOMEBREW_PREFIX}/opt/zeromq"
     )
 endif()
 
@@ -24,12 +23,26 @@ if(NOT SQLITE3_INCLUDE_DIR OR NOT SQLITE3_LIBRARY)
     message(FATAL_ERROR "SQLite3 not found")
 endif()
 
-# ZeroMQ
-find_path(ZMQ_INCLUDE_DIR zmq.h)
-find_library(ZMQ_LIBRARY zmq)
-if(NOT ZMQ_INCLUDE_DIR OR NOT ZMQ_LIBRARY)
-    message(FATAL_ERROR "ZeroMQ not found")
-endif()
+# ZeroMQ (vendored — static build)
+# CURVE disabled: transport encryption uses message-level AEAD (XChaCha20-Poly1305)
+# instead of ZMQ's CURVE protocol. This avoids ZMQ/libsodium integration complexity
+# while encrypting the same REQ/REP channels via strata_zmq_send/recv.
+set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WITH_PERF_TOOL OFF CACHE BOOL "" FORCE)
+set(WITH_DOCS OFF CACHE BOOL "" FORCE)
+set(WITH_DOC OFF CACHE BOOL "" FORCE)
+set(ENABLE_CURVE OFF CACHE BOOL "" FORCE)
+set(WITH_LIBSODIUM OFF CACHE BOOL "" FORCE)
+set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
+set(ENABLE_WS OFF CACHE BOOL "" FORCE)
+set(ENABLE_CPACK OFF CACHE BOOL "" FORCE)
+set(LIBZMQ_PEDANTIC OFF CACHE BOOL "" FORCE)
+set(LIBZMQ_WERROR OFF CACHE BOOL "" FORCE)
+add_subdirectory(vendor/libzmq EXCLUDE_FROM_ALL)
+target_compile_options(libzmq-static PRIVATE -w)
+set(ZMQ_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/libzmq/include")
 
 # TCC (vendored — in-memory C compiler for native dens)
 add_library(tcc vendor/tcc/libtcc.c)
@@ -64,16 +77,11 @@ endif()
 add_subdirectory(vendor/curl EXCLUDE_FROM_ALL)
 target_compile_options(libcurl_static PRIVATE -w)
 
-# OpenSSL (needed for SHA-256 and AEAD encryption)
-if(APPLE)
-    execute_process(
-        COMMAND brew --prefix openssl
-        OUTPUT_VARIABLE OPENSSL_ROOT_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    set(OPENSSL_ROOT_DIR "${OPENSSL_ROOT_DIR}" CACHE PATH "OpenSSL root")
-endif()
-find_package(OpenSSL REQUIRED)
+# libsodium (vendored — AEAD encryption, SHA-256, key derivation)
+add_subdirectory(vendor/libsodium EXCLUDE_FROM_ALL)
+
+# Note: curl handles its own OpenSSL linkage on Linux via CURL_USE_OPENSSL.
+# No top-level find_package(OpenSSL) needed — strata uses libsodium for all crypto.
 
 # QuickJS (vendored)
 add_library(quickjs
@@ -108,7 +116,7 @@ add_library(strata
     src/aead.c
     src/village.c
 )
-target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN)
+target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN ZMQ_STATIC)
 target_include_directories(strata PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/quickjs
@@ -116,7 +124,7 @@ target_include_directories(strata PUBLIC
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(strata quickjs tcc ${SQLITE3_LIBRARY} ${ZMQ_LIBRARY} OpenSSL::Crypto)
+target_link_libraries(strata quickjs tcc ${SQLITE3_LIBRARY} libzmq-static sodium_static)
 
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)
@@ -125,7 +133,7 @@ target_include_directories(store_service_lib PRIVATE
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(store_service_lib PRIVATE STORE_SERVICE_NO_MAIN)
+target_compile_definitions(store_service_lib PRIVATE STORE_SERVICE_NO_MAIN ZMQ_STATIC)
 
 add_executable(store_service src/store_service.c)
 target_include_directories(store_service PRIVATE
@@ -133,6 +141,7 @@ target_include_directories(store_service PRIVATE
     ${SQLITE3_INCLUDE_DIR}
     ${ZMQ_INCLUDE_DIR}
 )
+target_compile_definitions(store_service PRIVATE ZMQ_STATIC)
 target_link_libraries(store_service strata)
 
 # Tests
@@ -176,14 +185,15 @@ target_include_directories(code_smith_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(code_smith_lib PRIVATE CODE_SMITH_NO_MAIN)
+target_compile_definitions(code_smith_lib PRIVATE CODE_SMITH_NO_MAIN ZMQ_STATIC)
 
 add_executable(code_smith src/code_smith.c)
 target_include_directories(code_smith PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(code_smith ${ZMQ_LIBRARY})
+target_compile_definitions(code_smith PRIVATE ZMQ_STATIC)
+target_link_libraries(code_smith strata)
 
 # Cobbler vocation (C source validator via vendored TCC)
 add_library(cobbler_lib OBJECT src/cobbler.c)
@@ -192,7 +202,7 @@ target_include_directories(cobbler_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN)
+target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN ZMQ_STATIC)
 
 add_executable(cobbler src/cobbler.c)
 target_include_directories(cobbler PRIVATE
@@ -200,7 +210,8 @@ target_include_directories(cobbler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(cobbler ${ZMQ_LIBRARY} tcc)
+target_compile_definitions(cobbler PRIVATE ZMQ_STATIC)
+target_link_libraries(cobbler strata)
 
 # Messenger vocation (HTTP client via vendored libcurl)
 add_library(messenger_lib OBJECT src/messenger.c)
@@ -209,14 +220,15 @@ target_include_directories(messenger_lib PRIVATE
     ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(messenger_lib libcurl_static)
-target_compile_definitions(messenger_lib PRIVATE MESSENGER_NO_MAIN)
+target_compile_definitions(messenger_lib PRIVATE MESSENGER_NO_MAIN ZMQ_STATIC)
 
 add_executable(messenger src/messenger.c)
 target_include_directories(messenger PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(messenger ${ZMQ_LIBRARY} libcurl_static)
+target_compile_definitions(messenger PRIVATE ZMQ_STATIC)
+target_link_libraries(messenger strata libcurl_static)
 
 # Village daemon
 add_executable(village_daemon src/village.c)
@@ -224,6 +236,7 @@ target_include_directories(village_daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
+target_compile_definitions(village_daemon PRIVATE ZMQ_STATIC)
 target_link_libraries(village_daemon strata)
 
 # CLI tools
@@ -259,7 +272,7 @@ target_include_directories(test_cobbler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(test_cobbler ${ZMQ_LIBRARY} tcc)
+target_link_libraries(test_cobbler strata)
 add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Messenger test
@@ -268,7 +281,7 @@ target_include_directories(test_messenger PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(test_messenger ${ZMQ_LIBRARY} libcurl_static)
+target_link_libraries(test_messenger strata libcurl_static)
 add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Claude den test

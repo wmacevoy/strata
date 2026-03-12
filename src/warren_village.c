@@ -18,6 +18,7 @@
 #include <curl/curl.h>
 #include "strata/store.h"
 #include "strata/den.h"
+#include "strata/aead.h"
 
 extern int store_service_run(const char *db_path, const char *endpoint);
 extern int code_smith_run(const char *endpoint, const char *root, int readonly);
@@ -99,9 +100,9 @@ static int wait_for_store(const char *endpoint, int max_retries) {
     for (int i = 0; i < max_retries && !ready; i++) {
         usleep(100000);
         const char *probe = "{\"action\":\"init\"}";
-        if (zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+        if (strata_zmq_send(sock, probe, strlen(probe), 0) >= 0) {
             char resp[256];
-            int rc = zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            int rc = strata_zmq_recv(sock, resp, sizeof(resp) - 1, 0);
             if (rc > 0) {
                 resp[rc] = '\0';
                 if (strstr(resp, "\"ok\":true")) ready = 1;

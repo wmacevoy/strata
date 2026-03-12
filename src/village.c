@@ -147,6 +147,7 @@ int strata_remote_clone(strata_den_host *host, const char *den_name,
 
     void *zmq_ctx = zmq_ctx_new();
     void *req = zmq_socket(zmq_ctx, ZMQ_REQ);
+
     int timeout = 10000;
     zmq_setsockopt(req, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
     zmq_connect(req, village_endpoint);
@@ -342,6 +343,7 @@ int strata_village_run(const char *listen_endpoint) {
 
     void *zmq_ctx = zmq_ctx_new();
     void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
+
     zmq_bind(rep, listen_endpoint);
 
     int timeout = 1000;

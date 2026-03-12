@@ -385,9 +385,10 @@ int store_service_run(const char *db_path, const char *endpoint) {
     if (!store) { fprintf(stderr, "failed to open store\n"); return 1; }
     strata_store_init(store);
 
-    /* Load bedrock key for AEAD encryption at rest */
+    /* Load bedrock key for AEAD encryption at rest + CURVE transport */
     strata_aead_key bedrock_key;
-    if (strata_aead_key_from_env(&bedrock_key) == 0) {
+    int has_bedrock = (strata_aead_key_from_env(&bedrock_key) == 0);
+    if (has_bedrock) {
         strata_store_set_key(store, &bedrock_key);
         fprintf(stderr, "store_service: AEAD encryption enabled\n");
     }
@@ -396,6 +397,9 @@ int store_service_run(const char *db_path, const char *endpoint) {
     void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
     zmq_bind(rep, endpoint);
 
+    if (has_bedrock)
+        fprintf(stderr, "store_service: transport encryption enabled\n");
+
     int timeout = 1000;
     zmq_setsockopt(rep, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
 
@@ -403,13 +407,13 @@ int store_service_run(const char *db_path, const char *endpoint) {
 
     while (running) {
         char req[8192] = {0};
-        int rc = zmq_recv(rep, req, sizeof(req) - 1, 0);
+        int rc = strata_zmq_recv(rep, req, sizeof(req) - 1, 0);
         if (rc < 0) continue;
         req[rc] = '\0';
 
         char resp[16384] = {0};
         handle_request(store, req, rc, resp, sizeof(resp));
-        zmq_send(rep, resp, strlen(resp), 0);
+        strata_zmq_send(rep, resp, strlen(resp), 0);
     }
 
     zmq_close(rep);

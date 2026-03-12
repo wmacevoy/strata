@@ -25,7 +25,7 @@ Six components. Everything else is composed from these.
 | SQLite / PostgreSQL | Village store engine. SQLite for single-machine villages, PostgreSQL for city-scale. Same interface, swappable. |
 | SQLite | Den local storage. Permanent choice — every den gets its own SQLite db. Not swappable. |
 | ZeroMQ | Communication. Brokerless messaging. REQ/REP, PUB/SUB. The sole communication plane. |
-| AEAD AES | Encryption at rest. Every blob in the village store is AEAD encrypted. Role-keyed envelopes. |
+| libsodium | Encryption. XChaCha20-Poly1305 AEAD for blobs at rest and ZMQ transport in transit. HKDF-SHA256 for key derivation. SHA-256 for content addressing. |
 | QuickJS | JS den runtime. Stateful serve loops. First-class alongside native C. |
 | TCC | Native C den runtime. Vendored ~100KB compiler. Compiles C to native code, runs in fork-isolated sandbox. |
 
@@ -55,7 +55,7 @@ blob_permissions(blob_id TEXT, role_name TEXT) -- who can read
 
 **Any blob can be a preserved fossil** — den state, den source code, a restore plan, a human's commit. The blob layer doesn't know or care what's inside.
 
-**AEAD encrypted at rest.** Every blob's content is AEAD encrypted before storage. Role-keyed envelopes determine who can decrypt: the blob is encrypted with a random DEK, and the DEK is encrypted once per authorized role. An entity without the right role sees ciphertext, not "access denied." This is foundational — encryption lives in the blob layer, not above it.
+**AEAD encrypted at rest.** Every blob's content is sealed with XChaCha20-Poly1305 before storage. The bedrock key (set via `STRATA_BEDROCK_KEY` or `STRATA_BEDROCK_KEY_FILE`) is the master; per-blob keys are derived via HKDF-SHA256 with the blob's tags as context. Wire format: `"AE02" (4) || nonce (24) || ciphertext+tag (N+16)` — 44 bytes overhead. Role-keyed envelopes determine who can decrypt: an entity without the right role sees ciphertext, not "access denied." This is foundational — encryption lives in the blob layer, not above it.
 
 **Tag search uses AND logic.** Searching for tags `["a", "b"]` finds blobs tagged with both `a` AND `b`:
 ```sql
@@ -70,12 +70,14 @@ Key functions (`blob.c`): `strata_blob_put`, `strata_blob_get`, `strata_blob_fin
 
 Four socket patterns, used everywhere:
 
-| Pattern | Direction | Purpose |
-|---------|-----------|---------|
-| REQ/REP | REQ connects → REP binds | Synchronous request/response (store queries, den API) |
-| PUB/SUB | PUB binds → SUB connects | Event broadcast (artifact changes, den notifications) |
+| Pattern | Direction | Purpose | Encryption |
+|---------|-----------|---------|------------|
+| REQ/REP | REQ connects → REP binds | Synchronous request/response (store queries, den API) | AEAD encrypted |
+| PUB/SUB | PUB binds → SUB connects | Event broadcast (artifact changes, den notifications) | Plaintext |
 
 Every entity communicates through ZMQ. No direct database access from dens or CLIs (except `strata --db init` for bootstrap).
+
+**Transport encryption** is message-level AEAD, not ZMQ CURVE. Each REQ/REP frame is sealed with XChaCha20-Poly1305 using a transport key derived from the bedrock key (`HKDF-SHA256(bedrock, "zmq-transport")`). The `strata_zmq_send/recv` wrappers handle this transparently. PUB/SUB stays plaintext because ZMQ subscription filtering requires readable topic prefixes; payloads on PUB/SUB are metadata (repo IDs, artifact types), not sensitive content. When no bedrock key is configured, transport falls back to plaintext.
 
 ### To extend Layer 1
 
@@ -454,6 +456,61 @@ The guide describes "Everything Is a Fossil Repo." The reality is: everything is
 
 ---
 
+## Encryption
+
+All cryptography uses vendored libsodium 1.0.20 — no OpenSSL dependency for strata's own code. (Curl still uses OpenSSL on Linux for TLS, SecureTransport on macOS.)
+
+### Bedrock Key
+
+The master secret. Set via environment:
+- `STRATA_BEDROCK_KEY` — 64 hex characters (256-bit key)
+- `STRATA_BEDROCK_KEY_FILE` — path to raw 32-byte key file
+
+All other keys are derived from bedrock via HKDF-SHA256. When no bedrock key is set, encryption is disabled and all data flows in plaintext (development mode).
+
+### At Rest — Blob Encryption
+
+Blobs are sealed before storage using XChaCha20-Poly1305 AEAD.
+
+```
+Master Key ──HKDF──→ Per-Blob Key (derived from blob tags as context)
+                          │
+Plaintext ───seal──→ "AE02" (4) ║ nonce (24) ║ ciphertext+tag (N+16)
+                     ───────────────── 44 bytes overhead ──────────────
+```
+
+- **Key derivation:** `strata_aead_derive(bedrock, tag_context)` → HKDF-SHA256 extract (salt `"strata-aead"`) + expand
+- **Seal:** `strata_aead_seal()` — random 24-byte nonce, XChaCha20-Poly1305 encrypt, optional AAD (blob tags)
+- **Open:** `strata_aead_open()` — verify magic `"AE02"`, decrypt, authenticate tag
+- **Detection:** `strata_aead_is_sealed()` checks for `"AE02"` magic prefix
+
+Key files: `aead.c`, `aead.h`, `blob.c`.
+
+### In Transit — ZMQ Transport Encryption
+
+REQ/REP channels carry sensitive data (store queries, den API calls, vocation requests). These are encrypted at the message level using the same AEAD primitive.
+
+```
+Bedrock Key ──HKDF("zmq-transport")──→ Transport Key (cached, derived once)
+                                            │
+zmq_send(msg) → strata_zmq_send(msg) → seal(msg) → zmq_send(sealed)
+zmq_recv()    → strata_zmq_recv()    → zmq_recv(sealed) → open(sealed) → msg
+```
+
+| Channel | Encrypted | Reason |
+|---------|-----------|--------|
+| REQ/REP (store, den API, vocations) | Yes | Carries artifacts, blobs, credentials |
+| PUB/SUB (change events, notifications) | No | ZMQ topic filtering requires readable prefixes; payloads are metadata |
+| Relay (village-to-village forwarding) | No | Transparent byte proxy; inner messages are already sealed |
+
+**Backward compatible:** `strata_zmq_recv` auto-detects plaintext (no `"AE02"` header) and passes it through. This allows mixed encrypted/unencrypted development.
+
+### Content Addressing
+
+Blob IDs and artifact IDs are SHA-256 hashes of content, computed via `crypto_hash_sha256` (libsodium). Platform-independent — no CommonCrypto or OpenSSL.
+
+---
+
 ## Inter-Den Communication
 
 Dens don't talk directly to each other. Two patterns:
@@ -470,10 +527,10 @@ Dens don't talk directly to each other. Two patterns:
 
 | Layer | Implemented | Planned |
 |-------|-------------|---------|
-| 0: Foundation | SQLite, ZMQ, QuickJS, TCC | — |
-| 1: Blob + Message | Blob CRUD, tag search, role filtering | AEAD encryption at rest (foundational, not yet implemented) |
+| 0: Foundation | SQLite, ZMQ, QuickJS, TCC, libsodium | — |
+| 1: Blob + Message | Blob CRUD, tag search, role filtering, AEAD at rest, AEAD transport | — |
 | 2: Store | Repos, artifacts, roles, privileges, entity auth | Shamir trust tiers, vouch system, attribute engine |
-| 3: Services | store_service, village daemon, code-smith | Encrypted sync, ACL enforcement on ZMQ |
+| 3: Services | store_service, village daemon, code-smith | ACL enforcement on ZMQ |
 | 4: Dens | JS + native C runtimes, bedrock API, basic local_db save/load | Rich preserve (source + state + restore plan), quarantine |
 | 5: Vocations | code-smith, claude-homestead, cobbler | word-smith, mail-smith |
 | 6: Fossil | strata-human REPL, basic artifact browsing | Full timeline/diff/branch UI |

@@ -18,6 +18,7 @@
 #include <zmq.h>
 #include <curl/curl.h>
 
+#include "strata/aead.h"
 #include "strata/json_util.h"
 
 #define MAX_REQUEST_BODY   (1 * 1024 * 1024)   /* 1MB request body */
@@ -255,13 +256,13 @@ int messenger_run(const char *endpoint, int timeout) {
     }
 
     while (running) {
-        int rc = zmq_recv(rep, req_buf, MAX_REQUEST_BODY + 4095, 0);
+        int rc = strata_zmq_recv(rep, req_buf, MAX_REQUEST_BODY + 4095, 0);
         if (rc < 0) continue;
         req_buf[rc] = '\0';
 
         resp_buf[0] = '\0';
         handle_request(req_buf, rc, resp_buf, RESP_CAP);
-        zmq_send(rep, resp_buf, strlen(resp_buf), 0);
+        strata_zmq_send(rep, resp_buf, strlen(resp_buf), 0);
     }
 
     free(req_buf);

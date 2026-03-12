@@ -12,6 +12,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | schema.c | Schema migration placeholder; actual SQL in schema.h |
 | context.c | Entity context: stores entity_id, resolves roles for a repo |
 | blob.c | Content-addressed blob storage with tagging + role-based permissions |
+| aead.c | AEAD encryption (XChaCha20-Poly1305 via libsodium), HKDF-SHA256 key derivation, ZMQ transport encryption wrappers |
 | change.c | ZMQ PUB wrapper for artifact change notifications |
 | den.c | Den host: registers native C/JS dens, spawns via fork, runs TCC or QuickJS, manages bedrock ZMQ, per-den local SQLite, peer socket cache for den-to-den requests |
 | code_smith.c | Vocation den: file I/O + shell tools via ZMQ REP (read, write, exec, glob, grep, ls, discover) |
@@ -38,6 +39,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | context.h | `strata_ctx`, role resolution per entity+repo |
 | village.h | clone, remote_clone, relay, village_run |
 | blob.h | blob put/get/find, tag/untag, role-filtered discovery |
+| aead.h | `strata_aead_key`, seal/open (XChaCha20-Poly1305), HKDF key derivation, ZMQ transport wrappers |
 | change.h | `strata_change_pub`, publish artifact events |
 | json_util.h | Lightweight JSON: get_string, get_int, get_string_array, escape |
 
@@ -87,15 +89,19 @@ blob_permissions(blob_id, role_name)
 ## ZMQ Topology
 
 ```
-  dens/CLI (REQ) ──→ store_service (REP)     # all CRUD, auth, roles
-  change.c (PUB) ──→ dens/CLI (SUB)          # artifact change events
-  den (PUB)      ──→ subscribers (SUB)        # den-specific notifications
-  den (REP)      ──→ clients (REQ)            # den API (e.g. board POST/LIST)
-  den (REQ)      ──→ vocation (REP)           # den-to-den via bedrock.request(json, endpoint)
-  village (REP)  ──→ remote villages          # clone requests, relay
+  dens/CLI (REQ) ──→ store_service (REP)     # all CRUD, auth, roles         [AEAD encrypted]
+  change.c (PUB) ──→ dens/CLI (SUB)          # artifact change events        [plaintext]
+  den (PUB)      ──→ subscribers (SUB)        # den-specific notifications    [plaintext]
+  den (REP)      ──→ clients (REQ)            # den API (e.g. board POST/LIST)[AEAD encrypted]
+  den (REQ)      ──→ vocation (REP)           # den-to-den via bedrock        [AEAD encrypted]
+  village (REP)  ──→ remote villages          # clone requests, relay         [plaintext relay]
 ```
 
 All dens get 4 bedrock sockets: SUB (listen), REQ (store), PUB (notify), REP (serve).
+
+### Transport Encryption
+
+REQ/REP channels are encrypted via `strata_zmq_send/recv` — message-level AEAD (XChaCha20-Poly1305) using a transport key derived from the bedrock key. PUB/SUB stays plaintext (topics must be readable for ZMQ subscription filtering; payloads are metadata only). Relay proxies forward raw bytes (transparent). When no bedrock key is set (`STRATA_BEDROCK_KEY`), transport falls back to plaintext for development.
 Dens can also open peer REQ sockets to other dens/vocations via `bedrock.request(json, endpoint)` — cached, 60s timeout, max 8 peers.
 Each den gets a local SQLite database (loaded from store on start, saved back on stop).
 
@@ -168,8 +174,8 @@ Demo village with agent dens (gee, inch, loom, claude) + vocations (code-smith, 
 cmake -B build && cmake --build build && cd build && ctest
 ```
 
-Dependencies: SQLite3, ZeroMQ, OpenSSL (Linux only).
-Vendored: QuickJS (vendor/quickjs/), TCC (vendor/tcc/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS only, SecureTransport on macOS, OpenSSL on Linux).
+Dependencies: SQLite3.
+Vendored: libsodium 1.0.20 (vendor/libsodium/ — AEAD, SHA-256, key derivation), ZeroMQ 4.3.5 (vendor/libzmq/), QuickJS (vendor/quickjs/), TCC (vendor/tcc/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS only, SecureTransport on macOS, OpenSSL on Linux).
 
 ## Key Conventions
 
@@ -187,11 +193,11 @@ Vendored: QuickJS (vendor/quickjs/), TCC (vendor/tcc/), libcurl 8.14.1 (vendor/c
 ## Hard Rules
 
 - No agent runs outside a sandbox (fork + OS sandbox or QuickJS fork).
-- No plaintext at rest or on the wire (goal — AEAD not yet implemented).
+- No plaintext at rest (AEAD-encrypted blobs) or on the wire (AEAD-encrypted REQ/REP transport).
 - Capability injection, not request. Host decides what den gets.
 - Immutable audit trail. No rebase, no history rewrite.
 - Storage-agnostic core. No direct SQLite calls in business logic (store interface only).
-- Six foundations only: SQLite, ZMQ, TCC, QuickJS, AEAD AES, Shamir SSS.
+- Six foundations only: SQLite, ZMQ, TCC, QuickJS, libsodium (XChaCha20-Poly1305 + HKDF-SHA256), Shamir SSS.
 
 ## Architecture (Target)
 
@@ -206,7 +212,7 @@ Blob + Message (foundation)     ← content-addressed blobs, AEAD encrypted at r
 
 ## Build Phases
 
-1. **Bones** — repo engine, SQLite, encryption *(partially done)*
+1. **Bones** — repo engine, SQLite, encryption *(done — XChaCha20-Poly1305 at rest + in transit)*
 2. **Sandbox** — TCC + OS sandbox, capability injection *(done)*
 3. **Bedrock** — ZMQ, ACL, events, audit *(done)*
 4. **Guild** — Shamir vouches, trust tiers, credential collapse
