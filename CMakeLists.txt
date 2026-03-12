@@ -114,6 +114,7 @@ add_library(strata
     src/sandbox.c
     src/blob.c
     src/aead.c
+    src/shamir.c
     src/village.c
 )
 target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN ZMQ_STATIC)
@@ -292,6 +293,11 @@ target_include_directories(test_claude PRIVATE
 )
 target_link_libraries(test_claude strata libcurl_static)
 add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Shamir SSS test
+add_executable(test_shamir test/test_shamir.c)
+target_link_libraries(test_shamir strata)
+add_test(NAME test_shamir COMMAND test_shamir)
 
 # Examples
 add_executable(listener examples/listener.c)
