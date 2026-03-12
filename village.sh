@@ -64,12 +64,16 @@ check_deps() {
     done
     if command -v pkg-config &>/dev/null; then
         pkg-config --exists sqlite3 2>/dev/null || missing="$missing libsqlite3"
-        pkg-config --exists libzmq 2>/dev/null || missing="$missing libzmq"
+        # libzmq is vendored — no system package needed
+        # libssl needed on Linux for vendored curl's HTTPS support
+        if [ "$(uname)" != "Darwin" ]; then
+            pkg-config --exists openssl 2>/dev/null || missing="$missing libssl"
+        fi
     fi
     if [ -n "$missing" ]; then
         echo "ERROR: missing dependencies:$missing"
-        echo "  macOS:         brew install cmake sqlite zeromq"
-        echo "  Debian/Ubuntu: sudo apt install build-essential cmake pkg-config libsqlite3-dev libzmq3-dev"
+        echo "  macOS:         brew install cmake sqlite"
+        echo "  Debian/Ubuntu: sudo apt install build-essential cmake pkg-config libsqlite3-dev libssl-dev"
         exit 1
     fi
 }
