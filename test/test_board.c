@@ -3,7 +3,7 @@
  *
  * 1. Fork a store service
  * 2. Spawn the board strata (JS, via QuickJS in fork)
- * 3. Send POST requests via ZMQ REQ
+ * 3. Send POST requests via REQ
  * 4. Send LIST request, verify messages appear
  * 5. Verify PUB notification received
  */
@@ -14,7 +14,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <zmq.h>
+#include "strata/msg.h"
 #include "strata/store.h"
 #include "strata/den.h"
 
@@ -32,15 +32,9 @@ extern int store_service_run(const char *db_path, const char *endpoint);
 static pid_t store_pid = -1;
 static pid_t board_pid = -1;
 static strata_den_host *host = NULL;
-static void *zmq_ctx = NULL;
-static void *client = NULL;
-static void *notif_sub = NULL;
 
 static void cleanup(void) {
     if (board_pid > 0) { kill(board_pid, SIGTERM); waitpid(board_pid, NULL, 0); board_pid = -1; }
-    if (client) { zmq_close(client); client = NULL; }
-    if (notif_sub) { zmq_close(notif_sub); notif_sub = NULL; }
-    if (zmq_ctx) { zmq_ctx_destroy(zmq_ctx); zmq_ctx = NULL; }
     if (host) { strata_den_host_free(host); host = NULL; }
     if (store_pid > 0) { kill(store_pid, SIGINT); waitpid(store_pid, NULL, 0); store_pid = -1; }
     unlink(DB_PATH);
@@ -56,32 +50,37 @@ static void abort_handler(int sig) {
 
 /* Send a probe request to verify the store service is ready */
 static int wait_for_store(const char *endpoint, int max_retries) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
-    int timeout = 500;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
-
-    int ready = 0;
-    for (int i = 0; i < max_retries && !ready; i++) {
+    for (int i = 0; i < max_retries; i++) {
         usleep(100000);
+        strata_sock *sock = strata_req_connect(endpoint);
+        if (!sock) continue;
+        strata_msg_set_timeout(sock, 500, 500);
         const char *probe = "{\"action\":\"init\"}";
-        if (zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+        if (strata_msg_send(sock, probe, strlen(probe), 0) >= 0) {
             char resp[256];
-            int rc = zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            int rc = strata_msg_recv(sock, resp, sizeof(resp) - 1, 0);
+            strata_sock_close(sock);
             if (rc > 0) {
                 resp[rc] = '\0';
-                if (strstr(resp, "\"ok\":true")) ready = 1;
+                if (strstr(resp, "\"ok\":true")) return 1;
             }
+        } else {
+            strata_sock_close(sock);
         }
     }
+    return 0;
+}
 
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
-    return ready;
+/* Per-request helper: connect, send, recv, close */
+static int do_request(const char *endpoint, const char *req, char *resp, int resp_cap) {
+    strata_sock *sock = strata_req_connect(endpoint);
+    if (!sock) return -1;
+    strata_msg_set_timeout(sock, 5000, 5000);
+    strata_msg_send(sock, req, strlen(req), 0);
+    int rc = strata_msg_recv(sock, resp, resp_cap - 1, 0);
+    strata_sock_close(sock);
+    if (rc >= 0) resp[rc] = '\0';
+    return rc;
 }
 
 static void start_store_service(void) {
@@ -142,26 +141,18 @@ int main(void) {
     PASS();
 
     /* Set up a SUB socket to receive notifications */
-    zmq_ctx = zmq_ctx_new();
+    strata_sock *notif_sub = strata_sub_connect(BOARD_PUB);
+    assert(notif_sub != NULL);
+    strata_sub_subscribe(notif_sub, "board/");
+    strata_msg_set_timeout(notif_sub, 3000, -1);
 
-    notif_sub = zmq_socket(zmq_ctx, ZMQ_SUB);
-    zmq_connect(notif_sub, BOARD_PUB);
-    zmq_setsockopt(notif_sub, ZMQ_SUBSCRIBE, "board/", 6);
-    int timeout = 3000;
-    zmq_setsockopt(notif_sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-
-    /* Set up a REQ socket to call the board API */
-    client = zmq_socket(zmq_ctx, ZMQ_REQ);
-    zmq_connect(client, BOARD_REP);
-    zmq_setsockopt(client, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
     usleep(200000);  /* let sockets connect */
 
     /* POST a message */
     TEST("post a message");
-    const char *post_req = "{\"action\":\"post\",\"author\":\"alice\",\"message\":\"hello everyone\"}";
-    zmq_send(client, post_req, strlen(post_req), 0);
     char resp[4096] = {0};
-    rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+    const char *post_req = "{\"action\":\"post\",\"author\":\"alice\",\"message\":\"hello everyone\"}";
+    rc = do_request(BOARD_REP, post_req, resp, sizeof(resp));
     assert(rc > 0);
     if (!strstr(resp, "\"ok\":true")) { fprintf(stderr, "post response: %s\n", resp); }
     assert(strstr(resp, "\"ok\":true") != NULL);
@@ -171,9 +162,8 @@ int main(void) {
     /* POST another message */
     TEST("post second message");
     const char *post2 = "{\"action\":\"post\",\"author\":\"bob\",\"message\":\"hi alice\"}";
-    zmq_send(client, post2, strlen(post2), 0);
     memset(resp, 0, sizeof(resp));
-    rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+    rc = do_request(BOARD_REP, post2, resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     PASS();
@@ -181,9 +171,8 @@ int main(void) {
     /* LIST messages */
     TEST("list messages returns both");
     const char *list_req = "{\"action\":\"list\"}";
-    zmq_send(client, list_req, strlen(list_req), 0);
     memset(resp, 0, sizeof(resp));
-    rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+    rc = do_request(BOARD_REP, list_req, resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     assert(strstr(resp, "hello everyone") != NULL);
@@ -194,10 +183,8 @@ int main(void) {
     TEST("notification received via PUB");
     char topic[256] = {0};
     char payload[4096] = {0};
-    rc = zmq_recv(notif_sub, topic, sizeof(topic) - 1, 0);
+    rc = strata_sub_recv(notif_sub, topic, sizeof(topic), payload, sizeof(payload));
     if (rc > 0) {
-        rc = zmq_recv(notif_sub, payload, sizeof(payload) - 1, 0);
-        assert(rc > 0);
         assert(strstr(topic, "board/new") != NULL);
         assert(strstr(payload, "alice") != NULL || strstr(payload, "bob") != NULL);
         PASS();
@@ -205,6 +192,9 @@ int main(void) {
         /* PUB/SUB timing can cause missed messages — acceptable */
         printf("SKIP (timing)\n");
     }
+
+    /* Cleanup */
+    strata_sock_close(notif_sub);
 
     /* Cleanup happens via atexit */
     printf("ALL TESTS PASSED\n");

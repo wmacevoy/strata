@@ -3,96 +3,63 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include <zmq.h>
 #include <sqlite3.h>
 #include <libtcc.h>
 
 #include "strata/den.h"
 #include "strata/store.h"
 #include "strata/sandbox.h"
+#include "strata/msg.h"
 #include "strata/aead.h"
 
 /* ------------------------------------------------------------------ */
 /*  Bedrock context — shared by native C and QuickJS bindings        */
 /* ------------------------------------------------------------------ */
 
-#define MAX_PEER_SOCKS 8
-
 typedef struct {
-    void *zmq_ctx;
-    void *sub_sock;
-    void *req_sock;      /* default REQ → store_service */
-    void *pub_sock;
-    void *rep_sock;
+    strata_sock *sub_sock;
+    strata_pub_hub *pub_hub;
+    strata_sock *rep_listener;
+    strata_sock *rep_client;    /* current client between serve_recv/serve_send */
+    char req_endpoint[256];     /* for per-request REQ connections */
     sqlite3 *local_db;
     char den_name[64];
     char den_entity[256];
     char local_db_path[256];
-    /* Peer socket cache — for request(json, endpoint) */
-    void *peer_socks[MAX_PEER_SOCKS];
-    char  peer_endpoints[MAX_PEER_SOCKS][256];
-    int   peer_count;
 } bedrock_ctx_t;
 
 /* ------------------------------------------------------------------ */
-/*  ZMQ socket setup helpers                                           */
+/*  Socket setup helpers                                               */
 /* ------------------------------------------------------------------ */
 
 static void bedrock_setup(bedrock_ctx_t *bedrock, strata_den_def *def) {
     memset(bedrock, 0, sizeof(*bedrock));
-    bedrock->zmq_ctx = zmq_ctx_new();
-    int timeout = 5000;
 
     if (def->sub_endpoint[0]) {
-        bedrock->sub_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_SUB);
-        zmq_connect(bedrock->sub_sock, def->sub_endpoint);
-        zmq_setsockopt(bedrock->sub_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+        bedrock->sub_sock = strata_sub_connect(def->sub_endpoint);
+        if (bedrock->sub_sock)
+            strata_msg_set_timeout(bedrock->sub_sock, 5000, -1);
     }
     if (def->req_endpoint[0]) {
-        bedrock->req_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_REQ);
-        zmq_connect(bedrock->req_sock, def->req_endpoint);
-        zmq_setsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+        snprintf(bedrock->req_endpoint, sizeof(bedrock->req_endpoint),
+                 "%s", def->req_endpoint);
     }
     if (def->pub_endpoint[0]) {
-        bedrock->pub_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_PUB);
-        zmq_bind(bedrock->pub_sock, def->pub_endpoint);
+        bedrock->pub_hub = strata_pub_bind(def->pub_endpoint);
     }
     if (def->rep_endpoint[0]) {
-        bedrock->rep_sock = zmq_socket(bedrock->zmq_ctx, ZMQ_REP);
-        zmq_bind(bedrock->rep_sock, def->rep_endpoint);
-        zmq_setsockopt(bedrock->rep_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+        bedrock->rep_listener = strata_rep_bind(def->rep_endpoint);
+        if (bedrock->rep_listener)
+            strata_msg_set_timeout(bedrock->rep_listener, 5000, -1);
     }
-}
-
-/* Get or create a cached REQ socket to a peer endpoint */
-static void *bedrock_peer_sock(bedrock_ctx_t *bedrock, const char *endpoint) {
-    for (int i = 0; i < bedrock->peer_count; i++)
-        if (strcmp(bedrock->peer_endpoints[i], endpoint) == 0)
-            return bedrock->peer_socks[i];
-    if (bedrock->peer_count >= MAX_PEER_SOCKS) return NULL;
-    void *sock = zmq_socket(bedrock->zmq_ctx, ZMQ_REQ);
-    if (!sock) return NULL;
-    int timeout = 60000; /* 60s for potentially slow calls */
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    if (zmq_connect(sock, endpoint) != 0) { zmq_close(sock); return NULL; }
-    snprintf(bedrock->peer_endpoints[bedrock->peer_count], 256, "%s", endpoint);
-    bedrock->peer_socks[bedrock->peer_count] = sock;
-    bedrock->peer_count++;
-    return sock;
 }
 
 static void bedrock_teardown(bedrock_ctx_t *bedrock) {
     if (bedrock->local_db) sqlite3_close(bedrock->local_db);
-    for (int i = 0; i < bedrock->peer_count; i++)
-        if (bedrock->peer_socks[i]) zmq_close(bedrock->peer_socks[i]);
-    if (bedrock->sub_sock) zmq_close(bedrock->sub_sock);
-    if (bedrock->req_sock) zmq_close(bedrock->req_sock);
-    if (bedrock->pub_sock) zmq_close(bedrock->pub_sock);
-    if (bedrock->rep_sock) zmq_close(bedrock->rep_sock);
-    if (bedrock->zmq_ctx)  zmq_ctx_destroy(bedrock->zmq_ctx);
+    if (bedrock->rep_client)  strata_sock_close(bedrock->rep_client);
+    if (bedrock->sub_sock)    strata_sock_close(bedrock->sub_sock);
+    if (bedrock->pub_hub)     strata_pub_close(bedrock->pub_hub);
+    if (bedrock->rep_listener) strata_sock_close(bedrock->rep_listener);
 }
 
 /* ------------------------------------------------------------------ */
@@ -172,59 +139,57 @@ static void local_db_load(bedrock_ctx_t *bedrock, strata_den_def *def) {
              "/tmp/strata_den_%s.db", def->name);
 
     /* Try to fetch saved db from village store */
-    if (bedrock->req_sock) {
+    if (bedrock->req_endpoint[0]) {
         char req[512];
         snprintf(req, sizeof(req),
             "{\"action\":\"blob_find\",\"entity\":\"%s\",\"tags\":[\"den:%s:db\"]}",
             bedrock->den_entity, bedrock->den_name);
 
-        int rc = strata_zmq_send(bedrock->req_sock, req, strlen(req), 0);
-        if (rc >= 0) {
-            /* Use large buffer for db content */
-            size_t resp_cap = 4 * 1024 * 1024;  /* 4 MB */
-            char *resp = malloc(resp_cap);
-            if (resp) {
-                int old_timeout = 0;
-                size_t opt_len = sizeof(old_timeout);
-                zmq_getsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &old_timeout, &opt_len);
-                int load_timeout = 30000;
-                zmq_setsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &load_timeout, sizeof(load_timeout));
+        strata_sock *sock = strata_req_connect(bedrock->req_endpoint);
+        if (sock) {
+            strata_msg_set_timeout(sock, 30000, 5000);
+            int rc = strata_send(sock, req, strlen(req), 0);
+            if (rc >= 0) {
+                /* Use large buffer for db content */
+                size_t resp_cap = 4 * 1024 * 1024;  /* 4 MB */
+                char *resp = malloc(resp_cap);
+                if (resp) {
+                    rc = strata_recv(sock, resp, resp_cap - 1, 0);
 
-                rc = strata_zmq_recv(bedrock->req_sock, resp, resp_cap - 1, 0);
-                zmq_setsockopt(bedrock->req_sock, ZMQ_RCVTIMEO, &old_timeout, sizeof(old_timeout));
+                    if (rc > 0) {
+                        resp[rc] = '\0';
+                        /* Extract base64 content from last blob in response */
+                        /* Response format: {"ok":true,"blobs":[{"content":"base64..."}]} */
+                        char *content_key = strstr(resp, "\"content\":\"");
+                        if (content_key) {
+                            /* Find the LAST content field (latest blob) */
+                            char *last_content = content_key;
+                            while ((content_key = strstr(content_key + 1, "\"content\":\"")) != NULL)
+                                last_content = content_key;
 
-                if (rc > 0) {
-                    resp[rc] = '\0';
-                    /* Extract base64 content from last blob in response */
-                    /* Response format: {"ok":true,"blobs":[{"content":"base64..."}]} */
-                    char *content_key = strstr(resp, "\"content\":\"");
-                    if (content_key) {
-                        /* Find the LAST content field (latest blob) */
-                        char *last_content = content_key;
-                        while ((content_key = strstr(content_key + 1, "\"content\":\"")) != NULL)
-                            last_content = content_key;
-
-                        char *b64_start = last_content + 11;  /* skip "content":" */
-                        char *b64_end = strchr(b64_start, '"');
-                        if (b64_end) {
-                            *b64_end = '\0';
-                            size_t db_len = 0;
-                            unsigned char *db_data = base64_decode(b64_start, &db_len);
-                            if (db_data && db_len > 0) {
-                                FILE *f = fopen(bedrock->local_db_path, "wb");
-                                if (f) {
-                                    fwrite(db_data, 1, db_len, f);
-                                    fclose(f);
-                                    fprintf(stderr, "[%s] restored db (%zu bytes)\n",
-                                            bedrock->den_name, db_len);
+                            char *b64_start = last_content + 11;  /* skip "content":" */
+                            char *b64_end = strchr(b64_start, '"');
+                            if (b64_end) {
+                                *b64_end = '\0';
+                                size_t db_len = 0;
+                                unsigned char *db_data = base64_decode(b64_start, &db_len);
+                                if (db_data && db_len > 0) {
+                                    FILE *f = fopen(bedrock->local_db_path, "wb");
+                                    if (f) {
+                                        fwrite(db_data, 1, db_len, f);
+                                        fclose(f);
+                                        fprintf(stderr, "[%s] restored db (%zu bytes)\n",
+                                                bedrock->den_name, db_len);
+                                    }
+                                    free(db_data);
                                 }
-                                free(db_data);
                             }
                         }
                     }
+                    free(resp);
                 }
-                free(resp);
             }
+            strata_sock_close(sock);
         }
     }
 
@@ -245,7 +210,7 @@ static void local_db_save(bedrock_ctx_t *bedrock) {
     sqlite3_close(bedrock->local_db);
     bedrock->local_db = NULL;
 
-    if (!bedrock->req_sock) goto cleanup_file;
+    if (!bedrock->req_endpoint[0]) goto cleanup_file;
 
     /* Read the db file */
     FILE *f = fopen(bedrock->local_db_path, "rb");
@@ -277,11 +242,16 @@ static void local_db_save(bedrock_ctx_t *bedrock) {
             "\"entity\":\"%s\",\"tags\":[\"den:%s:db\"],\"roles\":[\"owner\"]}",
             b64, bedrock->den_entity, bedrock->den_name);
 
-        int rc = strata_zmq_send(bedrock->req_sock, req, strlen(req), 0);
-        if (rc >= 0) {
-            char resp[1024];
-            strata_zmq_recv(bedrock->req_sock, resp, sizeof(resp) - 1, 0);
-            fprintf(stderr, "[%s] saved db (%ld bytes)\n", bedrock->den_name, flen);
+        strata_sock *sock = strata_req_connect(bedrock->req_endpoint);
+        if (sock) {
+            strata_msg_set_timeout(sock, 30000, 5000);
+            int rc = strata_send(sock, req, strlen(req), 0);
+            if (rc >= 0) {
+                char resp[1024];
+                strata_recv(sock, resp, sizeof(resp) - 1, 0);
+                fprintf(stderr, "[%s] saved db (%ld bytes)\n", bedrock->den_name, flen);
+            }
+            strata_sock_close(sock);
         }
         free(req);
     }
@@ -310,28 +280,28 @@ static void native_bedrock_log(const char *msg) {
 
 static int native_bedrock_subscribe(const char *filter) {
     if (!g_bedrock_ctx || !g_bedrock_ctx->sub_sock || !filter) return -1;
-    return zmq_setsockopt(g_bedrock_ctx->sub_sock, ZMQ_SUBSCRIBE,
-                          filter, strlen(filter));
+    return strata_sub_subscribe(g_bedrock_ctx->sub_sock, filter);
 }
 
 static int native_bedrock_receive(char *topic_buf, int topic_cap,
                                   char *payload_buf, int payload_cap) {
     if (!g_bedrock_ctx || !g_bedrock_ctx->sub_sock) return -1;
-    int rc = zmq_recv(g_bedrock_ctx->sub_sock, topic_buf, topic_cap - 1, 0);
-    if (rc < 0) return -1;
-    topic_buf[rc < topic_cap ? rc : topic_cap - 1] = '\0';
-    rc = zmq_recv(g_bedrock_ctx->sub_sock, payload_buf, payload_cap - 1, 0);
-    if (rc >= 0) payload_buf[rc < payload_cap ? rc : payload_cap - 1] = '\0';
-    return rc;
+    return strata_sub_recv(g_bedrock_ctx->sub_sock,
+                           topic_buf, topic_cap,
+                           payload_buf, payload_cap);
 }
 
 static int native_bedrock_request(const char *req_json,
                                   char *resp_buf, int resp_cap) {
-    if (!g_bedrock_ctx || !g_bedrock_ctx->req_sock || !req_json) return -1;
-    int rc = strata_zmq_send(g_bedrock_ctx->req_sock, req_json, strlen(req_json), 0);
-    if (rc < 0) return -1;
-    rc = strata_zmq_recv(g_bedrock_ctx->req_sock, resp_buf, resp_cap - 1, 0);
+    if (!g_bedrock_ctx || !g_bedrock_ctx->req_endpoint[0] || !req_json) return -1;
+    strata_sock *sock = strata_req_connect(g_bedrock_ctx->req_endpoint);
+    if (!sock) return -1;
+    strata_msg_set_timeout(sock, 5000, 5000);
+    int rc = strata_send(sock, req_json, strlen(req_json), 0);
+    if (rc < 0) { strata_sock_close(sock); return -1; }
+    rc = strata_recv(sock, resp_buf, resp_cap - 1, 0);
     if (rc >= 0) resp_buf[rc] = '\0';
+    strata_sock_close(sock);
     return rc;
 }
 
@@ -339,31 +309,46 @@ static int native_bedrock_request_to(const char *endpoint,
                                      const char *req_json,
                                      char *resp_buf, int resp_cap) {
     if (!g_bedrock_ctx || !endpoint || !req_json) return -1;
-    void *sock = bedrock_peer_sock(g_bedrock_ctx, endpoint);
+    strata_sock *sock = strata_req_connect(endpoint);
     if (!sock) return -1;
-    int rc = strata_zmq_send(sock, req_json, strlen(req_json), 0);
-    if (rc < 0) return -1;
-    rc = strata_zmq_recv(sock, resp_buf, resp_cap - 1, 0);
+    strata_msg_set_timeout(sock, 60000, 60000);
+    int rc = strata_send(sock, req_json, strlen(req_json), 0);
+    if (rc < 0) { strata_sock_close(sock); return -1; }
+    rc = strata_recv(sock, resp_buf, resp_cap - 1, 0);
     if (rc >= 0) resp_buf[rc] = '\0';
+    strata_sock_close(sock);
     return rc;
 }
 
 static int native_bedrock_publish(const char *topic, const char *payload) {
-    if (!g_bedrock_ctx || !g_bedrock_ctx->pub_sock || !topic || !payload) return -1;
-    zmq_send(g_bedrock_ctx->pub_sock, topic, strlen(topic), ZMQ_SNDMORE);
-    return zmq_send(g_bedrock_ctx->pub_sock, payload, strlen(payload), 0);
+    if (!g_bedrock_ctx || !g_bedrock_ctx->pub_hub || !topic || !payload) return -1;
+    return strata_pub_send(g_bedrock_ctx->pub_hub,
+                           topic, strlen(topic),
+                           payload, strlen(payload));
 }
 
 static int native_bedrock_serve_recv(char *buf, int cap) {
-    if (!g_bedrock_ctx || !g_bedrock_ctx->rep_sock) return -1;
-    int rc = strata_zmq_recv(g_bedrock_ctx->rep_sock, buf, cap - 1, 0);
-    if (rc >= 0) buf[rc] = '\0';
+    if (!g_bedrock_ctx || !g_bedrock_ctx->rep_listener) return -1;
+    /* Accept a new client connection */
+    strata_sock *client = strata_rep_accept(g_bedrock_ctx->rep_listener);
+    if (!client) return -1;
+    int rc = strata_recv(client, buf, cap - 1, 0);
+    if (rc < 0) {
+        strata_sock_close(client);
+        return -1;
+    }
+    buf[rc] = '\0';
+    /* Store client for the subsequent serve_send */
+    g_bedrock_ctx->rep_client = client;
     return rc;
 }
 
 static int native_bedrock_serve_send(const char *resp) {
-    if (!g_bedrock_ctx || !g_bedrock_ctx->rep_sock || !resp) return -1;
-    return strata_zmq_send(g_bedrock_ctx->rep_sock, resp, strlen(resp), 0);
+    if (!g_bedrock_ctx || !g_bedrock_ctx->rep_client || !resp) return -1;
+    int rc = strata_send(g_bedrock_ctx->rep_client, resp, strlen(resp), 0);
+    strata_sock_close(g_bedrock_ctx->rep_client);
+    g_bedrock_ctx->rep_client = NULL;
+    return rc;
 }
 
 static int native_bedrock_db_exec(const char *sql) {
@@ -435,29 +420,29 @@ static JSValue js_bedrock_log(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* JS binding: bedrock.publish(topic, payload) -> bytes sent or -1 */
+/* JS binding: bedrock.publish(topic, payload) -> subscribers reached or -1 */
 static JSValue js_bedrock_publish(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
     bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
-    if (!bedrock || !bedrock->pub_sock || argc < 2) return JS_NewInt32(ctx, -1);
+    if (!bedrock || !bedrock->pub_hub || argc < 2) return JS_NewInt32(ctx, -1);
 
     const char *topic = JS_ToCString(ctx, argv[0]);
     const char *payload = JS_ToCString(ctx, argv[1]);
     int rc = -1;
     if (topic && payload) {
-        zmq_send(bedrock->pub_sock, topic, strlen(topic), ZMQ_SNDMORE);
-        rc = zmq_send(bedrock->pub_sock, payload, strlen(payload), 0);
+        rc = strata_pub_send(bedrock->pub_hub,
+                             topic, strlen(topic),
+                             payload, strlen(payload));
     }
     if (topic) JS_FreeCString(ctx, topic);
     if (payload) JS_FreeCString(ctx, payload);
     return JS_NewInt32(ctx, rc);
 }
 
-/* JS binding: bedrock.request(msg) -> response string or null */
 /* JS binding: bedrock.request(json [, endpoint]) -> response string or null
- * 1 arg:  sends to store (default req_sock)
- * 2 args: sends to arbitrary den/vocation endpoint via cached peer socket */
+ * 1 arg:  sends to store (default req_endpoint)
+ * 2 args: sends to arbitrary den/vocation endpoint */
 static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
@@ -467,33 +452,43 @@ static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
     const char *req = JS_ToCString(ctx, argv[0]);
     if (!req) return JS_NULL;
 
-    void *sock;
     const char *endpoint = NULL;
     if (argc >= 2) {
         endpoint = JS_ToCString(ctx, argv[1]);
         if (!endpoint) { JS_FreeCString(ctx, req); return JS_NULL; }
-        sock = bedrock_peer_sock(bedrock, endpoint);
     } else {
-        sock = bedrock->req_sock;
+        if (!bedrock->req_endpoint[0]) {
+            JS_FreeCString(ctx, req);
+            return JS_NULL;
+        }
     }
 
+    const char *target = endpoint ? endpoint : bedrock->req_endpoint;
+    strata_sock *sock = strata_req_connect(target);
     if (!sock) {
         JS_FreeCString(ctx, req);
         if (endpoint) JS_FreeCString(ctx, endpoint);
         return JS_NULL;
     }
 
-    int rc = strata_zmq_send(sock, req, strlen(req), 0);
+    /* Peer requests get longer timeout */
+    if (endpoint)
+        strata_msg_set_timeout(sock, 60000, 60000);
+    else
+        strata_msg_set_timeout(sock, 5000, 5000);
+
+    int rc = strata_send(sock, req, strlen(req), 0);
     JS_FreeCString(ctx, req);
     if (endpoint) JS_FreeCString(ctx, endpoint);
-    if (rc < 0) return JS_NULL;
+    if (rc < 0) { strata_sock_close(sock); return JS_NULL; }
 
     /* Dynamic receive buffer — peer responses (e.g. API calls) can be large */
     size_t buf_cap = (argc >= 2) ? (4 * 1024 * 1024) : 8192;
     char *resp = malloc(buf_cap);
-    if (!resp) return JS_NULL;
+    if (!resp) { strata_sock_close(sock); return JS_NULL; }
 
-    rc = strata_zmq_recv(sock, resp, buf_cap - 1, 0);
+    rc = strata_recv(sock, resp, buf_cap - 1, 0);
+    strata_sock_close(sock);
     if (rc < 0) { free(resp); return JS_NULL; }
     resp[rc] = '\0';
     JSValue result = JS_NewString(ctx, resp);
@@ -506,12 +501,21 @@ static JSValue js_bedrock_serve_recv(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
     bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
-    if (!bedrock || !bedrock->rep_sock) return JS_NULL;
+    if (!bedrock || !bedrock->rep_listener) return JS_NULL;
+
+    /* Accept a new client connection */
+    strata_sock *client = strata_rep_accept(bedrock->rep_listener);
+    if (!client) return JS_NULL;
 
     char buf[8192];
-    int rc = strata_zmq_recv(bedrock->rep_sock, buf, sizeof(buf) - 1, 0);
-    if (rc < 0) return JS_NULL;
+    int rc = strata_recv(client, buf, sizeof(buf) - 1, 0);
+    if (rc < 0) {
+        strata_sock_close(client);
+        return JS_NULL;
+    }
     buf[rc] = '\0';
+    /* Store client for the subsequent serve_send */
+    bedrock->rep_client = client;
     return JS_NewString(ctx, buf);
 }
 
@@ -520,13 +524,15 @@ static JSValue js_bedrock_serve_send(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val;
     bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
-    if (!bedrock || !bedrock->rep_sock || argc < 1) return JS_NewInt32(ctx, -1);
+    if (!bedrock || !bedrock->rep_client || argc < 1) return JS_NewInt32(ctx, -1);
 
     const char *resp = JS_ToCString(ctx, argv[0]);
     if (!resp) return JS_NewInt32(ctx, -1);
 
-    int rc = strata_zmq_send(bedrock->rep_sock, resp, strlen(resp), 0);
+    int rc = strata_send(bedrock->rep_client, resp, strlen(resp), 0);
     JS_FreeCString(ctx, resp);
+    strata_sock_close(bedrock->rep_client);
+    bedrock->rep_client = NULL;
     return JS_NewInt32(ctx, rc);
 }
 
@@ -540,7 +546,7 @@ static JSValue js_bedrock_subscribe(JSContext *ctx, JSValueConst this_val,
     const char *filter = JS_ToCString(ctx, argv[0]);
     if (!filter) return JS_NewInt32(ctx, -1);
 
-    int rc = zmq_setsockopt(bedrock->sub_sock, ZMQ_SUBSCRIBE, filter, strlen(filter));
+    int rc = strata_sub_subscribe(bedrock->sub_sock, filter);
     JS_FreeCString(ctx, filter);
     return JS_NewInt32(ctx, rc);
 }
@@ -554,13 +560,10 @@ static JSValue js_bedrock_receive(JSContext *ctx, JSValueConst this_val,
 
     char topic[512] = {0};
     char payload[8192] = {0};
-    int rc = zmq_recv(bedrock->sub_sock, topic, sizeof(topic) - 1, 0);
+    int rc = strata_sub_recv(bedrock->sub_sock,
+                             topic, sizeof(topic),
+                             payload, sizeof(payload));
     if (rc < 0) return JS_NULL;
-    topic[rc < (int)sizeof(topic) ? rc : (int)sizeof(topic) - 1] = '\0';
-
-    rc = zmq_recv(bedrock->sub_sock, payload, sizeof(payload) - 1, 0);
-    if (rc < 0) return JS_NULL;
-    payload[rc < (int)sizeof(payload) ? rc : (int)sizeof(payload) - 1] = '\0';
 
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "topic", JS_NewString(ctx, topic));

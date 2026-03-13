@@ -11,7 +11,6 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sodium.h>
-#include <zmq.h>
 #include "strata/aead.h"
 
 static const uint8_t AEAD_MAGIC[4] = {'A', 'E', '0', '2'};
@@ -185,7 +184,7 @@ int strata_aead_is_sealed(const uint8_t *data, size_t len) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ZMQ transport encryption (message-level AEAD)                      */
+/*  Transport encryption (message-level AEAD over strata_msg)           */
 /* ------------------------------------------------------------------ */
 
 static strata_aead_key g_transport_key;
@@ -195,15 +194,15 @@ strata_aead_key *strata_transport_key(void) {
     if (!g_transport_key_init) {
         strata_aead_key bedrock;
         if (strata_aead_key_from_env(&bedrock) != 0) return NULL;
-        strata_aead_derive(&bedrock, "zmq-transport", &g_transport_key);
+        strata_aead_derive(&bedrock, "transport", &g_transport_key);
         g_transport_key_init = 1;
     }
     return &g_transport_key;
 }
 
-int strata_zmq_send(void *sock, const void *buf, size_t len, int flags) {
+int strata_send(strata_sock *sock, const void *buf, size_t len, int flags) {
     strata_aead_key *tk = strata_transport_key();
-    if (!tk) return zmq_send(sock, buf, len, flags);
+    if (!tk) return strata_msg_send(sock, buf, len, flags);
 
     size_t enc_len = len + STRATA_OVERHEAD;
     uint8_t *enc = malloc(enc_len);
@@ -213,18 +212,18 @@ int strata_zmq_send(void *sock, const void *buf, size_t len, int flags) {
         free(enc);
         return -1;
     }
-    int rc = zmq_send(sock, enc, enc_len, flags);
+    int rc = strata_msg_send(sock, enc, enc_len, flags);
     free(enc);
     return rc;
 }
 
-int strata_zmq_recv(void *sock, void *buf, size_t len, int flags) {
+int strata_recv(strata_sock *sock, void *buf, size_t len, int flags) {
     /* Receive into a temp buffer large enough for the sealed message */
     size_t tmp_len = len + STRATA_OVERHEAD;
     uint8_t *tmp = malloc(tmp_len);
     if (!tmp) return -1;
 
-    int rc = zmq_recv(sock, tmp, tmp_len, flags);
+    int rc = strata_msg_recv(sock, tmp, tmp_len, flags);
     if (rc < 0) { free(tmp); return rc; }
 
     /* If not sealed, return plaintext as-is (backward compatible) */

@@ -1,7 +1,7 @@
 /*
  * strata-den CLI — den in container.
  *
- * All operations via ZMQ REQ/REP to store_service:
+ * All operations via TCP REQ/REP to store_service:
  *   msg post/list/get, blob put/get/find/tag/untag/tags, listen.
  *
  * No admin commands — bedrock enforces safety.
@@ -11,7 +11,7 @@
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
-#include <zmq.h>
+#include "strata/msg.h"
 #include "strata/aead.h"
 
 /* ------------------------------------------------------------------ */
@@ -54,20 +54,23 @@ static void free_csv(char **arr, int count) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ZMQ helpers                                                        */
+/*  Transport helpers                                                  */
 /* ------------------------------------------------------------------ */
 
-static int zmq_do_request(void *req_sock, const char *request,
-                          char *resp, int resp_cap) {
-    int rc = strata_zmq_send(req_sock, request, strlen(request), 0);
-    if (rc < 0) return -1;
-    rc = strata_zmq_recv(req_sock, resp, resp_cap - 1, 0);
-    if (rc < 0) return -1;
-    resp[rc] = '\0';
+static int do_request(const char *endpoint, const char *request,
+                      char *resp, int resp_cap) {
+    strata_sock *sock = strata_req_connect(endpoint);
+    if (!sock) return -1;
+    strata_msg_set_timeout(sock, 5000, 5000);
+    int rc = strata_send(sock, request, strlen(request), 0);
+    if (rc < 0) { strata_sock_close(sock); return -1; }
+    rc = strata_recv(sock, resp, resp_cap - 1, 0);
+    strata_sock_close(sock);
+    if (rc >= 0) resp[rc] = '\0';
     return rc;
 }
 
-/* Build a JSON roles array fragment: "role1","role2" */
+/* Build a JSON roles array fragment: "key":["a","b"] */
 static int append_json_array(char *buf, int cap, int pos,
                               const char *key, char **items, int count) {
     pos += snprintf(buf + pos, cap - pos, "\"%s\":[", key);
@@ -81,7 +84,7 @@ static int append_json_array(char *buf, int cap, int pos,
 /*  Artifact commands                                                  */
 /* ------------------------------------------------------------------ */
 
-static int cmd_msg_post(void *sock, den_opts *opts) {
+static int cmd_msg_post(const char *endpoint, den_opts *opts) {
     if (opts->argc < 3) {
         fprintf(stderr, "usage: strata-den ... msg post <repo> <type> <content> --roles r1,r2\n");
         return 1;
@@ -100,7 +103,7 @@ static int cmd_msg_post(void *sock, den_opts *opts) {
     free_csv(roles, nroles);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -108,7 +111,7 @@ static int cmd_msg_post(void *sock, den_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_msg_list(void *sock, den_opts *opts) {
+static int cmd_msg_list(const char *endpoint, den_opts *opts) {
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata-den ... msg list <repo> [--type <type>]\n");
         return 1;
@@ -124,7 +127,7 @@ static int cmd_msg_list(void *sock, den_opts *opts) {
             opts->argv[0], opts->entity);
 
     char resp[16384];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -132,7 +135,7 @@ static int cmd_msg_list(void *sock, den_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_msg_get(void *sock, den_opts *opts) {
+static int cmd_msg_get(const char *endpoint, den_opts *opts) {
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata-den ... msg get <artifact_id>\n");
         return 1;
@@ -143,7 +146,7 @@ static int cmd_msg_get(void *sock, den_opts *opts) {
         opts->argv[0], opts->entity);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -155,7 +158,7 @@ static int cmd_msg_get(void *sock, den_opts *opts) {
 /*  Blob commands                                                      */
 /* ------------------------------------------------------------------ */
 
-static int cmd_blob_put(void *sock, den_opts *opts) {
+static int cmd_blob_put(const char *endpoint, den_opts *opts) {
     const char *content = NULL;
     char *file_content = NULL;
 
@@ -196,7 +199,7 @@ static int cmd_blob_put(void *sock, den_opts *opts) {
     free_csv(roles, nroles);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -204,7 +207,7 @@ static int cmd_blob_put(void *sock, den_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_get(void *sock, den_opts *opts) {
+static int cmd_blob_get(const char *endpoint, den_opts *opts) {
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata-den ... blob get <blob_id>\n");
         return 1;
@@ -215,7 +218,7 @@ static int cmd_blob_get(void *sock, den_opts *opts) {
         opts->argv[0], opts->entity);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -223,7 +226,7 @@ static int cmd_blob_get(void *sock, den_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_find(void *sock, den_opts *opts) {
+static int cmd_blob_find(const char *endpoint, den_opts *opts) {
     char *tags[16];
     int ntags = parse_csv(opts->tags_csv, tags, 16);
 
@@ -235,7 +238,7 @@ static int cmd_blob_find(void *sock, den_opts *opts) {
     free_csv(tags, ntags);
 
     char resp[16384];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -243,7 +246,7 @@ static int cmd_blob_find(void *sock, den_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_tag(void *sock, den_opts *opts) {
+static int cmd_blob_tag(const char *endpoint, den_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata-den ... blob tag <blob_id> <tag>\n");
         return 1;
@@ -254,7 +257,7 @@ static int cmd_blob_tag(void *sock, den_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -262,7 +265,7 @@ static int cmd_blob_tag(void *sock, den_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_untag(void *sock, den_opts *opts) {
+static int cmd_blob_untag(const char *endpoint, den_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata-den ... blob untag <blob_id> <tag>\n");
         return 1;
@@ -273,7 +276,7 @@ static int cmd_blob_untag(void *sock, den_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -281,7 +284,7 @@ static int cmd_blob_untag(void *sock, den_opts *opts) {
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_tags(void *sock, den_opts *opts) {
+static int cmd_blob_tags(const char *endpoint, den_opts *opts) {
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata-den ... blob tags <blob_id>\n");
         return 1;
@@ -291,7 +294,7 @@ static int cmd_blob_tags(void *sock, den_opts *opts) {
         "{\"action\":\"blob_tags\",\"id\":\"%s\"}", opts->argv[0]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "{\"ok\":false,\"error\":\"timeout\"}\n");
         return 1;
     }
@@ -313,22 +316,19 @@ static int cmd_listen(den_opts *opts) {
     signal(SIGINT, listen_sigint);
     signal(SIGTERM, listen_sigint);
 
-    void *ctx = zmq_ctx_new();
-    void *sub = zmq_socket(ctx, ZMQ_SUB);
-    zmq_connect(sub, opts->endpoint);
-    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, topic, strlen(topic));
-
-    int timeout = 1000;
-    zmq_setsockopt(sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock *sub = strata_sub_connect(opts->endpoint);
+    if (!sub) {
+        fprintf(stderr, "failed to connect to %s\n", opts->endpoint);
+        return 1;
+    }
+    strata_sub_subscribe(sub, topic);
+    strata_msg_set_timeout(sub, 1000, -1);
 
     while (listen_running) {
-        char topic_buf[512] = {0}, payload[8192] = {0};
-        int rc = zmq_recv(sub, topic_buf, sizeof(topic_buf) - 1, 0);
+        char topic_buf[512], payload[8192];
+        int rc = strata_sub_recv(sub, topic_buf, sizeof(topic_buf),
+                                 payload, sizeof(payload));
         if (rc < 0) continue;
-        topic_buf[rc] = '\0';
-        rc = zmq_recv(sub, payload, sizeof(payload) - 1, 0);
-        if (rc < 0) continue;
-        payload[rc] = '\0';
 
         if (opts->plain)
             printf("[%s] %s\n", topic_buf, payload);
@@ -337,8 +337,7 @@ static int cmd_listen(den_opts *opts) {
         fflush(stdout);
     }
 
-    zmq_close(sub);
-    zmq_ctx_destroy(ctx);
+    strata_sock_close(sub);
     return 0;
 }
 
@@ -430,25 +429,18 @@ int main(int argc, char **argv) {
     if (strcmp(fullcmd, "listen") == 0)
         return cmd_listen(&opts);
 
-    /* All other commands use REQ/REP */
-    void *zmq_ctx = zmq_ctx_new();
-    void *req = zmq_socket(zmq_ctx, ZMQ_REQ);
-    zmq_setsockopt(req, ZMQ_RCVTIMEO, &opts.timeout_ms, sizeof(opts.timeout_ms));
-    zmq_connect(req, opts.endpoint);
-
+    /* All other commands use per-request TCP connections */
     int rc = 1;
-    if (strcmp(fullcmd, "msg_post") == 0)        rc = cmd_msg_post(req, &opts);
-    else if (strcmp(fullcmd, "msg_list") == 0)    rc = cmd_msg_list(req, &opts);
-    else if (strcmp(fullcmd, "msg_get") == 0)     rc = cmd_msg_get(req, &opts);
-    else if (strcmp(fullcmd, "blob_put") == 0)    rc = cmd_blob_put(req, &opts);
-    else if (strcmp(fullcmd, "blob_get") == 0)    rc = cmd_blob_get(req, &opts);
-    else if (strcmp(fullcmd, "blob_find") == 0)   rc = cmd_blob_find(req, &opts);
-    else if (strcmp(fullcmd, "blob_tag") == 0)    rc = cmd_blob_tag(req, &opts);
-    else if (strcmp(fullcmd, "blob_untag") == 0)  rc = cmd_blob_untag(req, &opts);
-    else if (strcmp(fullcmd, "blob_tags") == 0)   rc = cmd_blob_tags(req, &opts);
+    if (strcmp(fullcmd, "msg_post") == 0)        rc = cmd_msg_post(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "msg_list") == 0)    rc = cmd_msg_list(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "msg_get") == 0)     rc = cmd_msg_get(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "blob_put") == 0)    rc = cmd_blob_put(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "blob_get") == 0)    rc = cmd_blob_get(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "blob_find") == 0)   rc = cmd_blob_find(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "blob_tag") == 0)    rc = cmd_blob_tag(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "blob_untag") == 0)  rc = cmd_blob_untag(opts.endpoint, &opts);
+    else if (strcmp(fullcmd, "blob_tags") == 0)   rc = cmd_blob_tags(opts.endpoint, &opts);
     else { fprintf(stderr, "unknown command: %s\n", fullcmd); usage(); rc = 1; }
 
-    zmq_close(req);
-    zmq_ctx_destroy(zmq_ctx);
     return rc;
 }

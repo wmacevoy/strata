@@ -20,7 +20,7 @@ pid_t strata_clone(strata_den_host *host, const char *den_name,
                    const char *event_json, int event_len);
 
 /* Remote clone — send den to a remote village daemon.
- * village_endpoint:     ZMQ endpoint of the remote village daemon
+ * village_endpoint:     TCP endpoint of the remote village daemon
  * origin_req_endpoint:  store service the relay should forward to
  * event_json/event_len: event payload for the den
  * result:               output (den endpoints on remote village) */

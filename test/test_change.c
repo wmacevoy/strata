@@ -3,7 +3,7 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
-#include <zmq.h>
+#include "strata/msg.h"
 #include "strata/store.h"
 #include "strata/context.h"
 #include "strata/change.h"
@@ -28,26 +28,25 @@ int main(void) {
     assert(strata_repo_create(store, "proj-1", "Project One") == 0);
     assert(strata_role_assign(store, "alice", "developer", "proj-1") == 0);
 
-    /* Set up ZMQ publisher */
+    /* Set up publisher */
     TEST("create change publisher");
     strata_change_pub *pub = strata_change_pub_create(endpoint);
     assert(pub != NULL);
     strata_store_attach_change_pub(store, pub);
     PASS();
 
-    /* Set up ZMQ subscriber */
+    /* Set up subscriber */
     TEST("create subscriber");
-    void *zmq_ctx = zmq_ctx_new();
-    void *sub = zmq_socket(zmq_ctx, ZMQ_SUB);
-    assert(zmq_connect(sub, endpoint) == 0);
-    assert(zmq_setsockopt(sub, ZMQ_SUBSCRIBE, "change/", 7) == 0);
+    strata_sock *sub = strata_sub_connect(endpoint);
+    assert(sub != NULL);
+    strata_sub_subscribe(sub, "change/");
     PASS();
 
-    /* Give ZMQ time to establish connection */
+    /* Give time to establish connection */
     usleep(100000);  /* 100ms */
 
     /* Put an artifact — should trigger change event */
-    TEST("put artifact triggers ZMQ event");
+    TEST("put artifact triggers change event");
     strata_ctx *alice = strata_ctx_create("alice");
     const char *data = "hello world";
     const char *roles[] = {"developer"};
@@ -60,12 +59,9 @@ int main(void) {
     char payload[1024] = {0};
 
     /* Set a receive timeout so we don't hang forever */
-    int timeout = 2000;  /* 2 seconds */
-    zmq_setsockopt(sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_msg_set_timeout(sub, 2000, -1);
 
-    int rc = zmq_recv(sub, topic, sizeof(topic) - 1, 0);
-    assert(rc > 0);
-    rc = zmq_recv(sub, payload, sizeof(payload) - 1, 0);
+    int rc = strata_sub_recv(sub, topic, sizeof(topic), payload, sizeof(payload));
     assert(rc > 0);
     PASS();
 
@@ -83,8 +79,7 @@ int main(void) {
 
     /* Cleanup */
     strata_ctx_free(alice);
-    zmq_close(sub);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(sub);
     strata_store_close(store);  /* also frees change_pub */
     unlink(db_path);
 

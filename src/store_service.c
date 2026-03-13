@@ -1,7 +1,7 @@
 /*
- * Store service: ZMQ REP ↔ SQLite store bridge.
+ * Store service: TCP REP ↔ SQLite store bridge.
  *
- * Listens on a ZMQ REP socket, receives JSON requests,
+ * Listens on a TCP REP socket, receives JSON requests,
  * executes them against the role-filtered store, returns JSON responses.
  *
  * Protocol (artifacts):
@@ -38,11 +38,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-#include <zmq.h>
+#include "strata/msg.h"
 #include "strata/store.h"
 #include "strata/context.h"
 #include "strata/blob.h"
 #include "strata/json_util.h"
+#include "strata/aead.h"
 
 static volatile int running = 1;
 
@@ -385,7 +386,7 @@ int store_service_run(const char *db_path, const char *endpoint) {
     if (!store) { fprintf(stderr, "failed to open store\n"); return 1; }
     strata_store_init(store);
 
-    /* Load bedrock key for AEAD encryption at rest + CURVE transport */
+    /* Load bedrock key for AEAD encryption at rest */
     strata_aead_key bedrock_key;
     int has_bedrock = (strata_aead_key_from_env(&bedrock_key) == 0);
     if (has_bedrock) {
@@ -393,31 +394,35 @@ int store_service_run(const char *db_path, const char *endpoint) {
         fprintf(stderr, "store_service: AEAD encryption enabled\n");
     }
 
-    void *zmq_ctx = zmq_ctx_new();
-    void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
-    zmq_bind(rep, endpoint);
+    strata_sock *listener = strata_rep_bind(endpoint);
+    if (!listener) {
+        fprintf(stderr, "store_service: failed to bind %s\n", endpoint);
+        strata_store_close(store);
+        return 1;
+    }
+    strata_msg_set_timeout(listener, 1000, -1);
 
     if (has_bedrock)
         fprintf(stderr, "store_service: transport encryption enabled\n");
 
-    int timeout = 1000;
-    zmq_setsockopt(rep, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-
     fprintf(stderr, "store_service: listening on %s\n", endpoint);
 
     while (running) {
+        strata_sock *client = strata_rep_accept(listener);
+        if (!client) continue;
+
         char req[8192] = {0};
-        int rc = strata_zmq_recv(rep, req, sizeof(req) - 1, 0);
-        if (rc < 0) continue;
+        int rc = strata_recv(client, req, sizeof(req) - 1, 0);
+        if (rc < 0) { strata_sock_close(client); continue; }
         req[rc] = '\0';
 
         char resp[16384] = {0};
         handle_request(store, req, rc, resp, sizeof(resp));
-        strata_zmq_send(rep, resp, strlen(resp), 0);
+        strata_send(client, resp, strlen(resp), 0);
+        strata_sock_close(client);
     }
 
-    zmq_close(rep);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(listener);
     strata_store_close(store);
     return 0;
 }

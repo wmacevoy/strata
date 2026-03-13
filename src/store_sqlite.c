@@ -145,7 +145,7 @@ int strata_role_revoke(strata_store *store, const char *entity_id,
     return rc;
 }
 
-/* Attach a ZMQ change publisher to this store */
+/* Attach a change publisher to this store */
 void strata_store_set_change_pub(strata_store *store, strata_change_pub *pub) {
     if (store) store->change_pub = pub;
 }

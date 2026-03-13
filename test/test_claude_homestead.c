@@ -16,7 +16,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <zmq.h>
+#include "strata/msg.h"
 #include "strata/store.h"
 #include "strata/den.h"
 
@@ -77,22 +77,15 @@ static void start_store(void) {
     usleep(200000);
 }
 
-static int zmq_request(const char *endpoint, const char *req, char *resp, int resp_cap) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
-    int timeout = 5000;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
-    usleep(50000);
-
-    zmq_send(sock, req, strlen(req), 0);
-    int rc = zmq_recv(sock, resp, resp_cap - 1, 0);
+/* Per-request helper: connect, send, recv, close */
+static int do_request(const char *endpoint, const char *req, char *resp, int resp_cap) {
+    strata_sock *sock = strata_req_connect(endpoint);
+    if (!sock) return -1;
+    strata_msg_set_timeout(sock, 5000, 5000);
+    strata_msg_send(sock, req, strlen(req), 0);
+    int rc = strata_msg_recv(sock, resp, resp_cap - 1, 0);
+    strata_sock_close(sock);
     if (rc >= 0) resp[rc] = '\0';
-
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
     return rc;
 }
 
@@ -141,7 +134,7 @@ int main(void) {
     /* Test status — should be empty */
     char resp[8192] = {0};
     TEST("status returns empty state");
-    rc = zmq_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
+    rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     assert(strstr(resp, "\"homesteads\":[]") != NULL);
@@ -152,7 +145,7 @@ int main(void) {
     /* Create a repo through the den */
     TEST("create_repo via den");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"create_repo\",\"repo\":\"testproject\",\"name\":\"Test Project\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -162,7 +155,7 @@ int main(void) {
     /* Init a homestead */
     TEST("init_homestead");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"init_homestead\",\"name\":\"dev\","
         "\"village_ep\":\"tcp://192.168.1.10:6000\","
         "\"store_ep\":\"tcp://192.168.1.10:5560\"}",
@@ -174,7 +167,7 @@ int main(void) {
     /* Deploy a den to the homestead */
     TEST("deploy_den records deployment");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"deploy_den\",\"homestead\":\"dev\",\"den_name\":\"board\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -184,7 +177,7 @@ int main(void) {
     /* Status should now show the homestead */
     TEST("status shows configured homestead");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
+    rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"name\":\"dev\"") != NULL);
     assert(strstr(resp, "\"board\"") != NULL);
@@ -193,7 +186,7 @@ int main(void) {
     /* Grant a privilege through the den */
     TEST("grant privilege via den");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"grant\",\"entity\":\"alice\",\"privilege\":\"vocation\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -203,7 +196,7 @@ int main(void) {
     /* Test say — should log conversation */
     TEST("say logs conversation");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"say\",\"from\":\"test\",\"message\":\"hello homestead\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -214,7 +207,7 @@ int main(void) {
     /* Status should now show conversation_length > 0 */
     TEST("status includes conversation count");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
+    rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"conversation_length\":2") != NULL); /* user + assistant */
     PASS();
@@ -222,7 +215,7 @@ int main(void) {
     /* Test memory — should be empty initially */
     TEST("memory returns empty list");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP, "{\"action\":\"memory\"}", resp, sizeof(resp));
+    rc = do_request(CLAUDE_REP, "{\"action\":\"memory\"}", resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     assert(strstr(resp, "\"memory\":[]") != NULL);
@@ -231,7 +224,7 @@ int main(void) {
     /* Test remember */
     TEST("remember stores key-value");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"remember\",\"key\":\"project\",\"value\":\"strata\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -242,7 +235,7 @@ int main(void) {
     /* Test memory get by key */
     TEST("memory get by key");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"memory\",\"key\":\"project\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -252,13 +245,13 @@ int main(void) {
     /* Test forget — clears conversations but keeps memory + homesteads */
     TEST("forget clears conversations, keeps state");
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP, "{\"action\":\"forget\"}", resp, sizeof(resp));
+    rc = do_request(CLAUDE_REP, "{\"action\":\"forget\"}", resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
 
     /* Verify homestead and memory survive, conversations cleared */
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
+    rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"conversation_length\":0") != NULL);
     assert(strstr(resp, "\"name\":\"dev\"") != NULL);
@@ -267,7 +260,7 @@ int main(void) {
 
     /* Send a say before kill so we have conversation data for persistence test */
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP,
+    rc = do_request(CLAUDE_REP,
         "{\"action\":\"say\",\"from\":\"test\",\"message\":\"before restart\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -286,7 +279,7 @@ int main(void) {
     usleep(400000);
 
     memset(resp, 0, sizeof(resp));
-    rc = zmq_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
+    rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     assert(strstr(resp, "\"name\":\"dev\"") != NULL);       /* homestead survived */

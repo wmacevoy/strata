@@ -3,8 +3,8 @@
  *
  * Unlike the strata CLI (fire-and-forget commands), the human den is a
  * persistent process in the village. It has:
- *   - ZMQ REQ socket to store_service (same as every den)
- *   - ZMQ SUB socket for events (sees what happens in the village)
+ *   - TCP REQ connections to store_service (per-request)
+ *   - TCP SUB socket for events (sees what happens in the village)
  *   - Interactive command prompt for the human
  *
  * This is how a person becomes a villager — same door as every den.
@@ -15,7 +15,7 @@
 #include <signal.h>
 #include <getopt.h>
 #include <pthread.h>
-#include <zmq.h>
+#include "strata/msg.h"
 #include "strata/aead.h"
 #include "strata/json_util.h"
 
@@ -53,16 +53,19 @@ static const char *agent_lookup(const char *name) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ZMQ helpers                                                        */
+/*  Transport helpers                                                  */
 /* ------------------------------------------------------------------ */
 
-static int zmq_do_request(void *req_sock, const char *request,
-                          char *resp, int resp_cap) {
-    int rc = strata_zmq_send(req_sock, request, strlen(request), 0);
-    if (rc < 0) return -1;
-    rc = strata_zmq_recv(req_sock, resp, resp_cap - 1, 0);
-    if (rc < 0) return -1;
-    resp[rc] = '\0';
+static int do_request(const char *endpoint, const char *request,
+                      char *resp, int resp_cap) {
+    strata_sock *sock = strata_req_connect(endpoint);
+    if (!sock) return -1;
+    strata_msg_set_timeout(sock, 5000, 5000);
+    int rc = strata_send(sock, request, strlen(request), 0);
+    if (rc < 0) { strata_sock_close(sock); return -1; }
+    rc = strata_recv(sock, resp, resp_cap - 1, 0);
+    strata_sock_close(sock);
+    if (rc >= 0) resp[rc] = '\0';
     return rc;
 }
 
@@ -78,30 +81,23 @@ typedef struct {
 static void *event_listener(void *arg) {
     listener_args *la = arg;
 
-    void *ctx = zmq_ctx_new();
-    void *sub = zmq_socket(ctx, ZMQ_SUB);
-    zmq_connect(sub, la->sub_endpoint);
-    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, la->topic, strlen(la->topic));
-
-    int timeout = 500;
-    zmq_setsockopt(sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock *sub = strata_sub_connect(la->sub_endpoint);
+    if (!sub) return NULL;
+    strata_sub_subscribe(sub, la->topic);
+    strata_msg_set_timeout(sub, 500, -1);
 
     while (running) {
-        char topic_buf[512] = {0}, payload[8192] = {0};
-        int rc = zmq_recv(sub, topic_buf, sizeof(topic_buf) - 1, 0);
+        char topic_buf[512], payload[8192];
+        int rc = strata_sub_recv(sub, topic_buf, sizeof(topic_buf),
+                                 payload, sizeof(payload));
         if (rc < 0) continue;
-        topic_buf[rc] = '\0';
-        rc = zmq_recv(sub, payload, sizeof(payload) - 1, 0);
-        if (rc < 0) continue;
-        payload[rc] = '\0';
 
         /* Print event, then reprint the prompt */
         printf("\n  [event] %s: %s\n> ", topic_buf, payload);
         fflush(stdout);
     }
 
-    zmq_close(sub);
-    zmq_ctx_destroy(ctx);
+    strata_sock_close(sub);
     return NULL;
 }
 
@@ -154,7 +150,7 @@ static int build_json_array(char *buf, int cap, int pos,
     return pos;
 }
 
-static void handle_line(void *zmq_ctx, void *req_sock, const char *entity, const char *line) {
+static void handle_line(const char *endpoint, const char *entity, const char *line) {
     /* Tokenize the line */
     char buf[4096];
     strncpy(buf, line, sizeof(buf) - 1);
@@ -220,11 +216,6 @@ static void handle_line(void *zmq_ctx, void *req_sock, const char *entity, const
             if (i > 1) message[mpos++] = ' ';
             mpos += snprintf(message + mpos, sizeof(message) - mpos, "%s", tokens[i]);
         }
-        /* Create temporary REQ socket to agent */
-        void *agent_sock = zmq_socket(zmq_ctx, ZMQ_REQ);
-        int talk_timeout = 5000;
-        zmq_setsockopt(agent_sock, ZMQ_RCVTIMEO, &talk_timeout, sizeof(talk_timeout));
-        zmq_connect(agent_sock, ep);
 
         char talk_req[8192];
         char esc_message[4096];
@@ -234,12 +225,11 @@ static void handle_line(void *zmq_ctx, void *req_sock, const char *entity, const
             entity, esc_message);
 
         char talk_resp[16384];
-        if (zmq_do_request(agent_sock, talk_req, talk_resp, sizeof(talk_resp)) < 0) {
+        if (do_request(ep, talk_req, talk_resp, sizeof(talk_resp)) < 0) {
             printf("error: %s did not respond\n", agent_name);
         } else {
             printf("%s: %s\n", agent_name, talk_resp);
         }
-        zmq_close(agent_sock);
         return;
     }
 
@@ -368,7 +358,7 @@ static void handle_line(void *zmq_ctx, void *req_sock, const char *entity, const
         return;
     }
 
-    if (zmq_do_request(req_sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(endpoint, req, resp, sizeof(resp)) < 0) {
         printf("error: timeout\n");
     } else {
         printf("%s\n", resp);
@@ -384,7 +374,7 @@ static void usage(void) {
         "usage: strata-human --endpoint <store_url> --entity <id> [--sub <pub_url>] [--topic <filter>]\n"
         "                    [--agent name=endpoint ...]\n"
         "\n"
-        "  --endpoint  Store service ZMQ endpoint (REQ/REP)\n"
+        "  --endpoint  Store service endpoint (REQ/REP)\n"
         "  --entity    Your identity in the village\n"
         "  --sub       PUB endpoint to subscribe for events (optional)\n"
         "  --topic     Event topic filter (default: change/)\n"
@@ -433,13 +423,6 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, sigint_handler);
 
-    /* Connect REQ socket to store service */
-    void *zmq_ctx = zmq_ctx_new();
-    void *req = zmq_socket(zmq_ctx, ZMQ_REQ);
-    int timeout = 5000;
-    zmq_setsockopt(req, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_connect(req, endpoint);
-
     /* Start event listener thread if SUB endpoint provided */
     pthread_t listener_thread;
     listener_args la = { sub_endpoint, topic };
@@ -470,7 +453,7 @@ int main(int argc, char **argv) {
 
         if (len == 0) continue;
 
-        handle_line(zmq_ctx, req, entity, line);
+        handle_line(endpoint, entity, line);
     }
 
     printf("\nleaving village\n");
@@ -480,7 +463,5 @@ int main(int argc, char **argv) {
     if (sub_endpoint) {
         pthread_join(listener_thread, NULL);
     }
-    zmq_close(req);
-    zmq_ctx_destroy(zmq_ctx);
     return 0;
 }

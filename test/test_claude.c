@@ -11,7 +11,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <zmq.h>
+#include "strata/msg.h"
 #include <curl/curl.h>
 #include "strata/store.h"
 #include "strata/den.h"
@@ -35,13 +35,9 @@ static pid_t smith_pid = -1;
 static pid_t messenger_pid = -1;
 static pid_t claude_pid = -1;
 static strata_den_host *host = NULL;
-static void *zmq_ctx = NULL;
-static void *client = NULL;
 
 static void cleanup(void) {
     if (claude_pid > 0) { kill(claude_pid, SIGTERM); waitpid(claude_pid, NULL, 0); claude_pid = -1; }
-    if (client) { zmq_close(client); client = NULL; }
-    if (zmq_ctx) { zmq_ctx_destroy(zmq_ctx); zmq_ctx = NULL; }
     if (host) { strata_den_host_free(host); host = NULL; }
     if (messenger_pid > 0) { kill(messenger_pid, SIGTERM); waitpid(messenger_pid, NULL, 0); messenger_pid = -1; }
     if (smith_pid > 0) { kill(smith_pid, SIGTERM); waitpid(smith_pid, NULL, 0); smith_pid = -1; }
@@ -58,32 +54,37 @@ static void abort_handler(int sig) {
 }
 
 static int wait_for_service(const char *endpoint, int max_retries) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
-    int timeout = 500;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
-
-    int ready = 0;
-    for (int i = 0; i < max_retries && !ready; i++) {
+    for (int i = 0; i < max_retries; i++) {
         usleep(100000);
+        strata_sock *sock = strata_req_connect(endpoint);
+        if (!sock) continue;
+        strata_msg_set_timeout(sock, 500, 500);
         const char *probe = "{\"action\":\"init\"}";
-        if (zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+        if (strata_msg_send(sock, probe, strlen(probe), 0) >= 0) {
             char resp[256];
-            int rc = zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            int rc = strata_msg_recv(sock, resp, sizeof(resp) - 1, 0);
+            strata_sock_close(sock);
             if (rc > 0) {
                 resp[rc] = '\0';
-                if (strstr(resp, "\"ok\":true")) ready = 1;
+                if (strstr(resp, "\"ok\":true")) return 1;
             }
+        } else {
+            strata_sock_close(sock);
         }
     }
+    return 0;
+}
 
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
-    return ready;
+/* Per-request helper: connect, send, recv, close */
+static int do_request(const char *endpoint, const char *req, char *resp, int resp_cap) {
+    strata_sock *sock = strata_req_connect(endpoint);
+    if (!sock) return -1;
+    strata_msg_set_timeout(sock, 10000, 10000);
+    strata_msg_send(sock, req, strlen(req), 0);
+    int rc = strata_msg_recv(sock, resp, resp_cap - 1, 0);
+    strata_sock_close(sock);
+    if (rc >= 0) resp[rc] = '\0';
+    return rc;
 }
 
 int main(void) {
@@ -161,21 +162,11 @@ int main(void) {
     usleep(500000);
     PASS();
 
-    /* Set up client */
-    zmq_ctx = zmq_ctx_new();
-    client = zmq_socket(zmq_ctx, ZMQ_REQ);
-    int timeout = 10000;
-    zmq_setsockopt(client, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_connect(client, CLAUDE_REP);
-    usleep(200000);
-
     /* Test status */
     TEST("status action");
     {
-        const char *req = "{\"action\":\"status\"}";
-        zmq_send(client, req, strlen(req), 0);
         char resp[4096] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
         assert(rc > 0);
         assert(strstr(resp, "\"ok\":true") != NULL);
         assert(strstr(resp, "\"name\":\"claude\"") != NULL);
@@ -186,13 +177,12 @@ int main(void) {
     /* Test say — will fail gracefully without API key */
     TEST("say without API key returns error gracefully");
     {
-        const char *req = "{\"action\":\"say\",\"from\":\"test\",\"message\":\"hello\"}";
-        zmq_send(client, req, strlen(req), 0);
         char *resp = malloc(1024 * 1024);
         assert(resp);
-        rc = zmq_recv(client, resp, 1024 * 1024 - 1, 0);
+        rc = do_request(CLAUDE_REP,
+            "{\"action\":\"say\",\"from\":\"test\",\"message\":\"hello\"}",
+            resp, 1024 * 1024);
         assert(rc > 0);
-        resp[rc] = '\0';
         /* Should get an error about API key, not a crash */
         assert(strstr(resp, "\"ok\":false") != NULL || strstr(resp, "\"ok\":true") != NULL);
         free(resp);
@@ -202,10 +192,8 @@ int main(void) {
     /* Test forget */
     TEST("forget clears conversation history");
     {
-        const char *req = "{\"action\":\"forget\"}";
-        zmq_send(client, req, strlen(req), 0);
         char resp[1024] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = do_request(CLAUDE_REP, "{\"action\":\"forget\"}", resp, sizeof(resp));
         assert(rc > 0);
         assert(strstr(resp, "\"ok\":true") != NULL);
         assert(strstr(resp, "cleared") != NULL);
@@ -215,10 +203,8 @@ int main(void) {
     /* Test status shows 0 messages after forget */
     TEST("status shows 0 messages after forget");
     {
-        const char *req = "{\"action\":\"status\"}";
-        zmq_send(client, req, strlen(req), 0);
         char resp[4096] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
         assert(rc > 0);
         assert(strstr(resp, "\"conversation_length\":0") != NULL);
     }
@@ -228,14 +214,13 @@ int main(void) {
     TEST("persistence across restart");
     {
         /* Send a say to create some conversation state */
-        const char *req = "{\"action\":\"say\",\"from\":\"test\",\"message\":\"remember me\"}";
-        zmq_send(client, req, strlen(req), 0);
         char resp[8192] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = do_request(CLAUDE_REP,
+            "{\"action\":\"say\",\"from\":\"test\",\"message\":\"remember me\"}",
+            resp, sizeof(resp));
         assert(rc > 0);
 
-        /* Close client, kill den */
-        zmq_close(client); client = NULL;
+        /* Kill den */
         kill(claude_pid, SIGTERM);
         waitpid(claude_pid, NULL, 0);
         claude_pid = -1;
@@ -247,17 +232,9 @@ int main(void) {
         assert(claude_pid > 0);
         usleep(500000);
 
-        /* Reconnect */
-        client = zmq_socket(zmq_ctx, ZMQ_REQ);
-        zmq_setsockopt(client, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-        zmq_connect(client, CLAUDE_REP);
-        usleep(200000);
-
         /* Check status — should show messages from before restart */
-        const char *status_req = "{\"action\":\"status\"}";
-        zmq_send(client, status_req, strlen(status_req), 0);
         memset(resp, 0, sizeof(resp));
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = do_request(CLAUDE_REP, "{\"action\":\"status\"}", resp, sizeof(resp));
         assert(rc > 0);
         assert(strstr(resp, "\"ok\":true") != NULL);
         /* conversation_length should be > 0 (messages survived restart) */

@@ -23,7 +23,7 @@ typedef struct strata_den_def {
     /* JS mode */
     char js_path[256];
     char *js_source;            /* pre-loaded JS source (CoW across forks) */
-    /* ZMQ endpoints */
+    /* Network endpoints */
     char trigger_filter[256];
     char sub_endpoint[256];
     char req_endpoint[256];

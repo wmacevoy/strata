@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(strata C CXX)
+project(strata C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -9,26 +9,15 @@ add_subdirectory(vendor/sqlite EXCLUDE_FROM_ALL)
 set(SQLITE3_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/sqlite")
 set(SQLITE3_LIBRARY sqlite3_static)
 
-# ZeroMQ (vendored — static build)
-# CURVE disabled: transport encryption uses message-level AEAD (XChaCha20-Poly1305)
-# instead of ZMQ's CURVE protocol. This avoids ZMQ/libsodium integration complexity
-# while encrypting the same REQ/REP channels via strata_zmq_send/recv.
-set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(WITH_PERF_TOOL OFF CACHE BOOL "" FORCE)
-set(WITH_DOCS OFF CACHE BOOL "" FORCE)
-set(WITH_DOC OFF CACHE BOOL "" FORCE)
-set(ENABLE_CURVE OFF CACHE BOOL "" FORCE)
-set(WITH_LIBSODIUM OFF CACHE BOOL "" FORCE)
-set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
-set(ENABLE_WS OFF CACHE BOOL "" FORCE)
-set(ENABLE_CPACK OFF CACHE BOOL "" FORCE)
-set(LIBZMQ_PEDANTIC OFF CACHE BOOL "" FORCE)
-set(LIBZMQ_WERROR OFF CACHE BOOL "" FORCE)
-add_subdirectory(vendor/libzmq EXCLUDE_FROM_ALL)
-target_compile_options(libzmq-static PRIVATE -w)
-set(ZMQ_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/libzmq/include")
+# Prolog core + solver + reactive runtime (vendored)
+add_library(prolog_core
+    vendor/prolog/prolog_core.c
+    vendor/prolog/prolog_solver.c
+    vendor/prolog/reactive_core.c
+    vendor/prolog/reactive_prolog.c
+)
+target_include_directories(prolog_core PUBLIC vendor/prolog)
+target_compile_options(prolog_core PRIVATE -w)
 
 # TCC (vendored — in-memory C compiler for native dens)
 add_library(tcc vendor/tcc/libtcc.c)
@@ -100,35 +89,32 @@ add_library(strata
     src/sandbox.c
     src/blob.c
     src/aead.c
+    src/msg.c
     src/shamir.c
     src/village.c
 )
-target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN ZMQ_STATIC)
+target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN)
 target_include_directories(strata PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/quickjs
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${SQLITE3_INCLUDE_DIR}
-    ${ZMQ_INCLUDE_DIR}
 )
-target_link_libraries(strata quickjs tcc ${SQLITE3_LIBRARY} libzmq-static sodium_static)
+target_link_libraries(strata quickjs tcc prolog_core ${SQLITE3_LIBRARY} sodium_static)
 
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)
 target_include_directories(store_service_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${SQLITE3_INCLUDE_DIR}
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(store_service_lib PRIVATE STORE_SERVICE_NO_MAIN ZMQ_STATIC)
+target_compile_definitions(store_service_lib PRIVATE STORE_SERVICE_NO_MAIN)
 
 add_executable(store_service src/store_service.c)
 target_include_directories(store_service PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${SQLITE3_INCLUDE_DIR}
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(store_service PRIVATE ZMQ_STATIC)
 target_link_libraries(store_service strata)
 
 # Tests
@@ -170,16 +156,13 @@ add_test(NAME test_collaboration COMMAND test_collaboration WORKING_DIRECTORY ${
 add_library(code_smith_lib OBJECT src/code_smith.c)
 target_include_directories(code_smith_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(code_smith_lib PRIVATE CODE_SMITH_NO_MAIN ZMQ_STATIC)
+target_compile_definitions(code_smith_lib PRIVATE CODE_SMITH_NO_MAIN)
 
 add_executable(code_smith src/code_smith.c)
 target_include_directories(code_smith PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(code_smith PRIVATE ZMQ_STATIC)
 target_link_libraries(code_smith strata)
 
 # Cobbler vocation (C source validator via vendored TCC)
@@ -187,43 +170,35 @@ add_library(cobbler_lib OBJECT src/cobbler.c)
 target_include_directories(cobbler_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN ZMQ_STATIC)
+target_compile_definitions(cobbler_lib PRIVATE COBBLER_NO_MAIN)
 
 add_executable(cobbler src/cobbler.c)
 target_include_directories(cobbler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(cobbler PRIVATE ZMQ_STATIC)
 target_link_libraries(cobbler strata)
 
 # Messenger vocation (HTTP client via vendored libcurl)
 add_library(messenger_lib OBJECT src/messenger.c)
 target_include_directories(messenger_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(messenger_lib libcurl_static)
-target_compile_definitions(messenger_lib PRIVATE MESSENGER_NO_MAIN ZMQ_STATIC)
+target_compile_definitions(messenger_lib PRIVATE MESSENGER_NO_MAIN)
 
 add_executable(messenger src/messenger.c)
 target_include_directories(messenger PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(messenger PRIVATE ZMQ_STATIC)
 target_link_libraries(messenger strata libcurl_static)
 
 # Village daemon
 add_executable(village_daemon src/village.c)
 target_include_directories(village_daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ZMQ_INCLUDE_DIR}
 )
-target_compile_definitions(village_daemon PRIVATE ZMQ_STATIC)
 target_link_libraries(village_daemon strata)
 
 # CLI tools
@@ -257,7 +232,6 @@ add_executable(test_cobbler test/test_cobbler.c $<TARGET_OBJECTS:cobbler_lib>)
 target_include_directories(test_cobbler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
-    ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(test_cobbler strata)
 add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -266,7 +240,6 @@ add_test(NAME test_cobbler COMMAND test_cobbler WORKING_DIRECTORY ${CMAKE_CURREN
 add_executable(test_messenger test/test_messenger.c $<TARGET_OBJECTS:messenger_lib>)
 target_include_directories(test_messenger PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(test_messenger strata libcurl_static)
 add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -275,7 +248,6 @@ add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_CU
 add_executable(test_claude test/test_claude.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:messenger_lib>)
 target_include_directories(test_claude PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ZMQ_INCLUDE_DIR}
 )
 target_link_libraries(test_claude strata libcurl_static)
 add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -284,6 +256,19 @@ add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_CURRENT_
 add_executable(test_shamir test/test_shamir.c)
 target_link_libraries(test_shamir strata)
 add_test(NAME test_shamir COMMAND test_shamir)
+
+# Prolog tests
+add_executable(test_reactive test/test_reactive.c)
+target_link_libraries(test_reactive prolog_core)
+add_test(NAME test_reactive COMMAND test_reactive)
+
+add_executable(test_solver test/test_solver.c)
+target_link_libraries(test_solver prolog_core)
+add_test(NAME test_solver COMMAND test_solver)
+
+add_executable(test_reactive_prolog test/test_reactive_prolog.c)
+target_link_libraries(test_reactive_prolog prolog_core)
+add_test(NAME test_reactive_prolog COMMAND test_reactive_prolog)
 
 # Examples
 add_executable(listener examples/listener.c)

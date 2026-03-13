@@ -1,7 +1,7 @@
 /*
  * code-smith — a vocation den that provides file I/O and shell tools.
  *
- * JSON-over-ZMQ-REP service. Same pattern as store_service.
+ * JSON-over-TCP-REP service. Same pattern as store_service.
  *
  * Actions: discover, read, write, exec, glob, grep, ls
  *
@@ -19,7 +19,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <glob.h>
-#include <zmq.h>
+#include "strata/msg.h"
 
 #include "strata/aead.h"
 #include "strata/json_util.h"
@@ -493,12 +493,12 @@ int code_smith_run(const char *endpoint, const char *root, int readonly) {
     }
     readonly_mode = readonly;
 
-    void *zmq_ctx = zmq_ctx_new();
-    void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
-    zmq_bind(rep, endpoint);
-
-    int timeout = 1000;
-    zmq_setsockopt(rep, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock *listener = strata_rep_bind(endpoint);
+    if (!listener) {
+        fprintf(stderr, "code-smith: cannot bind to %s\n", endpoint);
+        return 1;
+    }
+    strata_msg_set_timeout(listener, 1000, -1);
 
     fprintf(stderr, "code-smith: listening on %s  root=%s  readonly=%d\n",
             endpoint, root_path, readonly_mode);
@@ -508,24 +508,27 @@ int code_smith_run(const char *endpoint, const char *root, int readonly) {
     if (!req_buf || !resp_buf) {
         fprintf(stderr, "code-smith: malloc failed\n");
         free(req_buf); free(resp_buf);
-        zmq_close(rep); zmq_ctx_destroy(zmq_ctx);
+        strata_sock_close(listener);
         return 1;
     }
 
     while (running) {
-        int rc = strata_zmq_recv(rep, req_buf, MAX_FILE_SIZE + 4095, 0);
-        if (rc < 0) continue;
+        strata_sock *client = strata_rep_accept(listener);
+        if (!client) continue;
+
+        int rc = strata_recv(client, req_buf, MAX_FILE_SIZE + 4095, 0);
+        if (rc < 0) { strata_sock_close(client); continue; }
         req_buf[rc] = '\0';
 
         resp_buf[0] = '\0';
         handle_request(req_buf, rc, resp_buf, RESP_CAP);
-        strata_zmq_send(rep, resp_buf, strlen(resp_buf), 0);
+        strata_send(client, resp_buf, strlen(resp_buf), 0);
+        strata_sock_close(client);
     }
 
     free(req_buf);
     free(resp_buf);
-    zmq_close(rep);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(listener);
     fprintf(stderr, "code-smith: shutdown\n");
     return 0;
 }

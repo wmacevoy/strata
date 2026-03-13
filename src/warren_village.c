@@ -14,11 +14,11 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include <zmq.h>
 #include <curl/curl.h>
+#include "strata/msg.h"
+#include "strata/aead.h"
 #include "strata/store.h"
 #include "strata/den.h"
-#include "strata/aead.h"
 
 extern int store_service_run(const char *db_path, const char *endpoint);
 extern int code_smith_run(const char *endpoint, const char *root, int readonly);
@@ -87,31 +87,24 @@ static void abort_handler(int sig) {
 }
 
 static int wait_for_store(const char *endpoint, int max_retries) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
-    int timeout = 500;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
-
     int ready = 0;
     for (int i = 0; i < max_retries && !ready; i++) {
         usleep(100000);
+        strata_sock *sock = strata_req_connect(endpoint);
+        if (!sock) continue;
+        strata_msg_set_timeout(sock, 500, 500);
+
         const char *probe = "{\"action\":\"init\"}";
-        if (strata_zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+        if (strata_send(sock, probe, strlen(probe), 0) >= 0) {
             char resp[256];
-            int rc = strata_zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            int rc = strata_recv(sock, resp, sizeof(resp) - 1, 0);
             if (rc > 0) {
                 resp[rc] = '\0';
                 if (strstr(resp, "\"ok\":true")) ready = 1;
             }
         }
+        strata_sock_close(sock);
     }
-
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
     return ready;
 }
 

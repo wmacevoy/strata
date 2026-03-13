@@ -55,7 +55,7 @@ int strata_sandbox_apply(void) {
         SC_ALLOW(__NR_readlink),
         SC_ALLOW(__NR_newfstatat),
 
-        /* ZMQ networking */
+        /* TCP networking */
         SC_ALLOW(__NR_socket),
         SC_ALLOW(__NR_connect),
         SC_ALLOW(__NR_bind),
@@ -68,7 +68,7 @@ int strata_sandbox_apply(void) {
         SC_ALLOW(__NR_getsockname),
         SC_ALLOW(__NR_getpeername),
 
-        /* Polling (ZMQ) */
+        /* Polling (TCP transport) */
         SC_ALLOW(__NR_poll),
         SC_ALLOW(__NR_ppoll),
         SC_ALLOW(__NR_epoll_create1),
@@ -81,7 +81,7 @@ int strata_sandbox_apply(void) {
         SC_ALLOW(__NR_gettimeofday),
         SC_ALLOW(__NR_nanosleep),
 
-        /* Threading/sync (ZMQ internals) */
+        /* Threading/sync */
         SC_ALLOW(__NR_futex),
         SC_ALLOW(__NR_clone),
         SC_ALLOW(__NR_set_robust_list),
