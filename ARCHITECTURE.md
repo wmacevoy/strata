@@ -8,17 +8,18 @@ Strata is a secure multi-tenant SCM and agent orchestration platform. The founda
 Layer 6: Fossil         — human-facing timeline, history, diffs (built on blobs)
 Layer 5: Vocations      — dens that serve capabilities (code-smith, claude-homestead)
 Layer 4: Dens           — sandboxed execution, bedrock API, preserve/restore
+  └─ Prolog + Reactive  — inference engine, reactive queries, auto-wired events
 Layer 3: Services       — store_service JSON bridge, village daemon
 Layer 2: Store          — repos, roles, entities, privileges
 Layer 1: Blob + Message — content-addressed blobs, ZMQ messaging
-Layer 0: Foundation     — SQLite, ZMQ, QuickJS, TCC
+Layer 0: Foundation     — SQLite, ZMQ, QuickJS, TCC, Prolog
 ```
 
 ---
 
 ## Layer 0 — Foundation
 
-Six components. Everything else is composed from these.
+Seven components. Everything else is composed from these.
 
 | Component | Role |
 |-----------|------|
@@ -28,6 +29,7 @@ Six components. Everything else is composed from these.
 | libsodium | Encryption. XChaCha20-Poly1305 AEAD for blobs at rest and ZMQ transport in transit. HKDF-SHA256 for key derivation. SHA-256 for content addressing. |
 | QuickJS | JS den runtime. Stateful serve loops. First-class alongside native C. |
 | TCC | Native C den runtime. Vendored ~100KB compiler. Compiles C to native code, runs in fork-isolated sandbox. |
+| Prolog + Reactive | Inference engine for dens. 32-bit tagged terms, backtracking solver, signal/memo/effect runtime. SUB events auto-wire to Prolog facts. Available in C (vendor/prolog/) and JS (embedded in QuickJS runtime). Ported from embedded-prolog. |
 
 Planned but not yet implemented:
 
@@ -203,11 +205,32 @@ Every den — native C or JS — gets the same 9 functions:
 
 ### Two Runtimes
 
-**JS (QuickJS):** Load .js → fork → bind `bedrock` global → `JS_Eval()`. Script runs its own serve loop. Stateful via JS vars + local SQLite.
+**JS (QuickJS):** Load .js → fork → bind `bedrock` global → pre-eval Prolog engine (reactive.js + prolog-engine.js + reactive-prolog.js + den-engine.js) → `JS_Eval()` den code. Script runs its own serve loop. Stateful via JS vars + local SQLite.
 
-**Native C (TCC):** Load .c source → fork → TCC compile to native → inject bedrock symbols via `tcc_add_symbol()` → try `serve()` else `on_event()`. Sandboxed via seccomp-bpf (Linux) / Seatbelt (macOS). Bedrock functions use null-terminated strings (not ptr/len pairs).
+**Native C (TCC):** Load .c source → fork → TCC compile to native → inject bedrock symbols via `tcc_add_symbol()` → try `serve()` else `on_event()`. Sandboxed via seccomp-bpf (Linux) / Seatbelt (macOS). Bedrock functions use null-terminated strings (not ptr/len pairs). Native C dens can link against `prolog_core` for the C Prolog/reactive API.
 
 Both share identical bedrock interface, fork isolation, and privilege system.
+
+### Prolog + Reactive Runtime
+
+Every JS den has access to a full Prolog inference engine with reactive query support, pre-loaded as globals:
+
+**PrologEngine** — Full Prolog interpreter with backtracking solver. Supports facts, rules, `\+` (negation), `findall`, arithmetic, list operations, `assert`/`retract`, `copy_term`, `=..` (univ).
+
+**Reactive primitives** — `createSignal`, `createMemo`, `createEffect`. Automatic dependency tracking: when a signal changes, all dependent memos recompute and effects re-run.
+
+**createReactiveEngine(engine)** — Wraps a PrologEngine with a generation signal. `bump()` after fact changes triggers all reactive queries to recompute. `createQuery(goalFn)` / `createQueryFirst(goalFn)` return reactive query accessors.
+
+**createDenEngine(engine)** — Full auto-wiring bridge between bedrock SUB events and Prolog facts:
+- `poll()` — drains SUB queue, maps each `{topic, payload}` to Prolog facts, bumps once
+- `processEvent({topic, payload})` — topic `type/name` → `updateFact("type", ["name"], [payload])`
+- `updateFact(functor, keyArgs, valueArgs)` — retract old matching fact, assert new, caller bumps
+
+Convention: topic `sensor/temp` with payload `22.5` becomes Prolog fact `sensor(temp, 22.5)`. JSON object payloads expand to multiple value args. Retract-before-assert keeps exactly one fact per key.
+
+**Security model:** Prolog facts are inert labeled tuples. A malicious SUB message just asserts a meaningless fact that no rule matches. No code execution, no injection — facts can't call functions or modify rules.
+
+The C-level Prolog API (`vendor/prolog/`) provides the same capabilities for native dens: `ps_solver` for the solver, `rx_ctx` for reactive primitives, `rp_engine` for the reactive bridge. All state is in structs (no globals), so it's fork-safe.
 
 ### Den Registration and Spawn
 
@@ -317,10 +340,57 @@ bedrock.log(NAME + " going to sleep after " + count + " conversations");
 
 Key files: `den.c`, `den.h`. Examples: `dens/gee.js`, `dens/inch.js`, `dens/loom.js`.
 
+### Reactive JS Den Template
+
+For dens that need inference over streaming events:
+
+```javascript
+var atom = PrologEngine.atom;
+var variable = PrologEngine.variable;
+var compound = PrologEngine.compound;
+var num = PrologEngine.num;
+
+var e = new PrologEngine();
+
+// Rules
+e.addClause(
+    compound("alert", [variable("X")]),
+    [compound("sensor", [atom("temp"), variable("X")]),
+     compound(">", [variable("X"), num(40)])]
+);
+
+// Create den engine (auto-wires SUB → Prolog facts)
+var den = createDenEngine(e);
+
+// Subscribe to events
+bedrock.subscribe("sensor/");
+
+// Reactive query — recomputes when facts change
+var alertQ = den.createQueryFirst(function() {
+    return compound("alert", [variable("X")]);
+});
+
+// Serve loop
+while (true) {
+    den.poll();  // drain SUB → Prolog facts, bump
+    var a = alertQ();
+    if (a) bedrock.log("ALERT: temp=" + a.args[0].value);
+
+    var raw = bedrock.serve_recv();
+    if (raw === null) continue;
+    // ... handle requests ...
+    bedrock.serve_send(JSON.stringify({ok: true}));
+}
+```
+
+Key files: `dens/lib/den-engine.js`, `vendor/prolog/prolog_js_embed.h`, `vendor/prolog/den_engine_js_embed.h`.
+
 ### To extend Layer 4
 
-- New JS den: follow the template above, add to `dens/`, register in village launcher
+- New JS den: follow the template above, add to `dens/`, register in village launcher. Prolog/reactive globals are available immediately.
+- New reactive JS den: use `createDenEngine(new PrologEngine())`, add rules with `.engine.addClause()`, call `.poll()` in serve loop to auto-wire SUB events to Prolog facts
 - New native C den: write C source including `strata/bedrock.h`, export `serve()` or `on_event()`
+- New Prolog JS globals: add to `dens/lib/`, generate embed header, include in `den.c`, pre-eval before den code
 - New bedrock function: add to `bedrock_ctx_t`, implement for both JS and native C, register in `js_child_run`/`native_child_run`
 
 ---
@@ -527,11 +597,11 @@ Dens don't talk directly to each other. Two patterns:
 
 | Layer | Implemented | Planned |
 |-------|-------------|---------|
-| 0: Foundation | SQLite, ZMQ, QuickJS, TCC, libsodium | — |
+| 0: Foundation | SQLite, ZMQ, QuickJS, TCC, libsodium, Prolog+Reactive | — |
 | 1: Blob + Message | Blob CRUD, tag search, role filtering, AEAD at rest, AEAD transport | — |
 | 2: Store | Repos, artifacts, roles, privileges, entity auth | Shamir trust tiers, vouch system, attribute engine |
 | 3: Services | store_service, village daemon, code-smith | ACL enforcement on ZMQ |
-| 4: Dens | JS + native C runtimes, bedrock API, basic local_db save/load | Rich preserve (source + state + restore plan), quarantine |
+| 4: Dens | JS + native C runtimes, bedrock API, basic local_db save/load, Prolog inference + reactive queries, auto-wired SUB→fact bridge | Rich preserve (source + state + restore plan), quarantine |
 | 5: Vocations | code-smith, claude-homestead, cobbler | word-smith, mail-smith |
 | 6: Fossil | strata-human REPL, basic artifact browsing | Full timeline/diff/branch UI |
 

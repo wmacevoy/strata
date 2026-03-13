@@ -76,6 +76,23 @@ int main(void) {
     assert(WEXITSTATUS(status) == 0);
     PASS();
 
+    /* Register den engine test den (JS) */
+    TEST("register den engine test den (JS)");
+    rc = strata_den_js_register(host, "den_engine_test", "dens/den_engine_test.js",
+                                NULL, NULL, NULL, NULL);
+    assert(rc == 0);
+    PASS();
+
+    /* Spawn den engine test den */
+    TEST("spawn den engine test den");
+    pid_t pid4 = strata_den_spawn(host, "den_engine_test", "{}", 2);
+    assert(pid4 > 0);
+    waited = waitpid(pid4, &status, 0);
+    assert(waited == pid4);
+    assert(WIFEXITED(status));
+    assert(WEXITSTATUS(status) == 0);
+    PASS();
+
     /* Cleanup */
     strata_den_host_free(host);
 

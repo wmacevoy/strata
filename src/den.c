@@ -12,6 +12,7 @@
 #include "strata/msg.h"
 #include "strata/aead.h"
 #include "prolog_js_embed.h"
+#include "den_engine_js_embed.h"
 
 /* ------------------------------------------------------------------ */
 /*  Bedrock context — shared by native C and QuickJS bindings        */
@@ -697,6 +698,8 @@ static void js_child_run(strata_den_def *def,
             "prolog-engine.js", JS_EVAL_TYPE_GLOBAL);
     JS_Eval(ctx, js_reactive_prolog_src, sizeof(js_reactive_prolog_src) - 1,
             "reactive-prolog.js", JS_EVAL_TYPE_GLOBAL);
+    JS_Eval(ctx, js_den_engine_src, sizeof(js_den_engine_src) - 1,
+            "den-engine.js", JS_EVAL_TYPE_GLOBAL);
 
     /* Evaluate the JS source */
     JSValue result = JS_Eval(ctx, def->js_source, strlen(def->js_source),

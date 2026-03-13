@@ -14,7 +14,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | blob.c | Content-addressed blob storage with tagging + role-based permissions |
 | aead.c | AEAD encryption (XChaCha20-Poly1305 via libsodium), HKDF-SHA256 key derivation, ZMQ transport encryption wrappers |
 | change.c | ZMQ PUB wrapper for artifact change notifications |
-| den.c | Den host: registers native C/JS dens, spawns via fork, runs TCC or QuickJS, manages bedrock ZMQ, per-den local SQLite, peer socket cache for den-to-den requests |
+| den.c | Den host: registers native C/JS dens, spawns via fork, runs TCC or QuickJS, manages bedrock ZMQ, per-den local SQLite, peer socket cache for den-to-den requests. JS dens get Prolog engine + reactive runtime + den-engine bridge pre-loaded |
 | code_smith.c | Vocation den: file I/O + shell tools via ZMQ REP (read, write, exec, glob, grep, ls, discover) |
 | cobbler.c | Vocation den: C source validator via vendored TCC, ZMQ REP (compile, compile_file, discover) |
 | messenger.c | Vocation den: HTTP client via vendored libcurl, ZMQ REP (fetch, discover) |
@@ -29,6 +29,16 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | cli_human_den.c | `strata-human` | Interactive REPL: REQ to store + SUB for events + talk to agents |
 | cli_strata_homestead.c | `strata-homestead` | Containerized village: forks store_service + village_daemon |
 | store_service.c | `store_service` | ZMQ REP listener: JSON protocol bridge between dens and SQLite |
+
+### Prolog + Reactive Engine (vendor/prolog/)
+| File | Purpose |
+|------|---------|
+| prolog_core.c/h | Native term layer: 32-bit tagged terms (atom/var/num/compound), arena allocation, interned atoms, trail-based substitution, unification, deepWalk |
+| prolog_solver.c/h | Clause database + backtracking solver: goal resolution, builtins (`\+`, `findall`, `is`, `assert`, `retract`, `=..`, `copy_term`, list ops), var_counter stride for fresh variables |
+| reactive_core.c/h | Signal/memo/effect runtime: automatic dependency tracking, batch updates, all state in `rx_ctx` (fork-safe) |
+| reactive_prolog.c/h | Bridge: single generation signal drives reactive queries. `rp_assert`/`rp_retract`/`rp_update_sensor` + `rp_bump` → all queries recompute |
+| prolog_js_embed.h | Auto-generated C byte arrays embedding reactive.js + prolog-engine.js + reactive-prolog.js (from embedded-prolog) |
+| den_engine_js_embed.h | Auto-generated C byte array embedding dens/lib/den-engine.js |
 
 ### Headers (include/strata/)
 | File | Key Types |
@@ -53,6 +63,9 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | claude-homestead.js | Vocation den: builds homesteads, local SQLite tables (homesteads, dens_deployed, repos_tracked, conversations, memory) |
 | claude.js | Claude agent: uses messenger (Anthropic API), code-smith (file I/O), cobbler (C validation), persistent memory + conversation via local SQLite |
 | gatekeeper.js | Access control: request_join/approve/deny, "destination decides" pattern |
+| lib/den-engine.js | Auto-wiring bridge: SUB events → Prolog facts via `createDenEngine()`. Convention: topic `type/name` → fact `type(name, value)`. Retract-before-assert keeps facts current. `poll()` drains queue + bumps once |
+| prolog_test.js | Test den: PrologEngine (grandparent inference), reactive (signals/memos), reactive Prolog (createReactiveEngine + bump) |
+| den_engine_test.js | Test den: createDenEngine auto-wiring, updateFact, processEvent, reactive queries on sensor/derived facts |
 | echo.c | Minimal native C test: on_event() trigger, logs via bedrock |
 
 ### Tests (test/)
@@ -61,7 +74,10 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | test_store.c | SQLite ops, repos, roles, artifacts, privileges, entity auth |
 | test_blob.c | Blob storage, AND-logic tagging, permission filtering |
 | test_change.c | ZMQ PUB, subscriber receives artifact change events |
-| test_den.c | Den host, register native C (echo.c), spawn, reap |
+| test_den.c | Den host, register native C (echo.c), spawn, reap, JS Prolog test den, JS den-engine test den |
+| test_reactive.c | Reactive core: signals, memos, effects, batching |
+| test_solver.c | Prolog solver: unification, backtracking, builtins, negation, findall |
+| test_reactive_prolog.c | Reactive Prolog: generation signal, reactive queries, assert/retract/bump, sensor updates, batch |
 | test_board.c | E2E: store_service + board.js via QuickJS, POST/LIST/PUB |
 | test_village.c | Local clone, relay, multi-process bedrock |
 | test_claude_homestead.c | Homestead den lifecycle, conversation/memory persistence, respawn restore |
@@ -127,7 +143,7 @@ Vocations are dens that provide tools to other dens. Not new infrastructure — 
 
 **Native C (TCC):** Load .c source → fork → TCC compile to native → inject bedrock symbols via `tcc_add_symbol()` → try `serve()` else `on_event()`. Sandboxed via seccomp-bpf (Linux) / Seatbelt (macOS).
 
-**JS (QuickJS):** Load .js text → fork → create runtime/context → bind `bedrock` global object → `JS_Eval()`. Stateful via JS vars + serve loop.
+**JS (QuickJS):** Load .js text → fork → create runtime/context → bind `bedrock` global object → pre-eval Prolog engine (reactive.js + prolog-engine.js + reactive-prolog.js + den-engine.js) → `JS_Eval()` den code. Stateful via JS vars + serve loop.
 
 Both share: bedrock ZMQ interface, fork isolation, privilege system.
 
@@ -142,6 +158,12 @@ Both share: bedrock ZMQ interface, fork isolation, privilege system.
 - `bedrock.db_query(sql)` — query local SQLite, returns JSON array of row objects
 
 Native C dens `#include "strata/bedrock.h"` and call bedrock functions directly (null-terminated strings, no FFI).
+
+**JS Globals (available in all JS dens):**
+- `PrologEngine` — Full Prolog interpreter: `atom()`, `variable()`, `compound()`, `num()`, `new PrologEngine()`, `.addClause()`, `.retractFirst()`, `.query()`, `.queryFirst()`
+- `createSignal(initial)` / `createMemo(fn)` / `createEffect(fn)` — Reactive primitives (signals, memos, effects with automatic dependency tracking)
+- `createReactiveEngine(engine)` — Wraps PrologEngine with reactive queries: `.createQuery()`, `.createQueryFirst()`, `.bump()`, `.act()`, `.onUpdate()`
+- `createDenEngine(engine)` — Full auto-wiring bridge: `.poll()` drains SUB → Prolog facts, `.processEvent({topic,payload})`, `.updateFact(functor, keys, vals)`. Convention: topic `type/name` → fact `type(name, value)`, retract-before-assert, single bump per poll
 
 ## Execution Flow
 
@@ -175,7 +197,7 @@ cmake -B build && cmake --build build && cd build && ctest
 ```
 
 Dependencies: SQLite3.
-Vendored: libsodium 1.0.20 (vendor/libsodium/ — AEAD, SHA-256, key derivation), ZeroMQ 4.3.5 (vendor/libzmq/), QuickJS (vendor/quickjs/), TCC (vendor/tcc/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS only, SecureTransport on macOS, OpenSSL on Linux).
+Vendored: libsodium 1.0.20 (vendor/libsodium/ — AEAD, SHA-256, key derivation), ZeroMQ 4.3.5 (vendor/libzmq/), QuickJS (vendor/quickjs/), TCC (vendor/tcc/), libcurl 8.14.1 (vendor/curl/ — HTTP/HTTPS only, SecureTransport on macOS, OpenSSL on Linux), Prolog engine (vendor/prolog/ — prolog_core + prolog_solver + reactive_core + reactive_prolog, ported from embedded-prolog).
 
 ## Key Conventions
 
@@ -197,7 +219,7 @@ Vendored: libsodium 1.0.20 (vendor/libsodium/ — AEAD, SHA-256, key derivation)
 - Capability injection, not request. Host decides what den gets.
 - Immutable audit trail. No rebase, no history rewrite.
 - Storage-agnostic core. No direct SQLite calls in business logic (store interface only).
-- Six foundations only: SQLite, ZMQ, TCC, QuickJS, libsodium (XChaCha20-Poly1305 + HKDF-SHA256), Shamir SSS.
+- Seven foundations only: SQLite, ZMQ, TCC, QuickJS, libsodium (XChaCha20-Poly1305 + HKDF-SHA256), Shamir SSS, embedded Prolog (reactive inference engine).
 
 ## Architecture (Target)
 
@@ -205,6 +227,7 @@ Vendored: libsodium 1.0.20 (vendor/libsodium/ — AEAD, SHA-256, key derivation)
 Fossil (human-facing)           ← timeline, diffs, browsable repos
 Vocations (capabilities)        ← dens that serve tools (code-smith, etc.)
 Dens (sandboxed execution)      ← TCC/QuickJS, bedrock API, preserve/restore
+  └─ Prolog + Reactive          ← inference engine, reactive queries, auto-wired SUB events
 Services (bridges)              ← store_service, village daemon
 Store (access control)          ← repos, roles, entities, privileges (SQLite or PostgreSQL)
 Blob + Message (foundation)     ← content-addressed blobs, AEAD encrypted at rest, ZMQ messaging
