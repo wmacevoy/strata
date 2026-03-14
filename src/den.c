@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <sqlite3.h>
 #include <libtcc.h>
@@ -11,6 +12,7 @@
 #include "strata/sandbox.h"
 #include "strata/msg.h"
 #include "strata/aead.h"
+#include "strata/json_util.h"
 #include "prolog_js_embed.h"
 #include "den_engine_js_embed.h"
 
@@ -634,9 +636,19 @@ static JSValue js_bedrock_db_query(JSContext *ctx, JSValueConst this_val,
                     "\"%s\":%g", cn, sqlite3_column_double(stmt, i));
             else if (type == SQLITE_NULL)
                 pos += snprintf(buf + pos, cap - pos, "\"%s\":null", cn);
-            else
-                pos += snprintf(buf + pos, cap - pos,
-                    "\"%s\":\"%s\"", cn, (const char *)sqlite3_column_text(stmt, i));
+            else {
+                const char *raw = (const char *)sqlite3_column_text(stmt, i);
+                int raw_len = raw ? (int)strlen(raw) : 0;
+                /* Escape for JSON — worst case 2x expansion */
+                int esc_cap = raw_len * 2 + 1;
+                char *esc = malloc(esc_cap);
+                if (esc) {
+                    json_escape(raw ? raw : "", raw_len, esc, esc_cap);
+                    pos += snprintf(buf + pos, cap - pos,
+                        "\"%s\":\"%s\"", cn, esc);
+                    free(esc);
+                }
+            }
         }
         pos += snprintf(buf + pos, cap - pos, "}");
     }
@@ -653,6 +665,10 @@ static void js_child_run(strata_den_def *def,
     bedrock_ctx_t bedrock;
     bedrock_setup(&bedrock, def);
     local_db_load(&bedrock, def);
+
+    /* Apply OS sandbox unless privileged (vocations need network/exec) */
+    if (!def->privileged)
+        strata_sandbox_apply();
 
     JSRuntime *rt = JS_NewRuntime();
     JSContext *ctx = JS_NewContext(rt);
@@ -691,15 +707,21 @@ static void js_child_run(strata_den_def *def,
 
     JS_FreeValue(ctx, global);
 
-    /* Pre-load Prolog engine (reactive.js + prolog-engine.js + reactive-prolog.js) */
+    /* Pre-load Prolog engine + parser + den-engine */
     JS_Eval(ctx, js_reactive_src, sizeof(js_reactive_src) - 1,
             "reactive.js", JS_EVAL_TYPE_GLOBAL);
     JS_Eval(ctx, js_prolog_engine_src, sizeof(js_prolog_engine_src) - 1,
             "prolog-engine.js", JS_EVAL_TYPE_GLOBAL);
+    JS_Eval(ctx, js_parser_src, sizeof(js_parser_src) - 1,
+            "parser.js", JS_EVAL_TYPE_GLOBAL);
+    JS_Eval(ctx, js_load_string_src, sizeof(js_load_string_src) - 1,
+            "load-string.js", JS_EVAL_TYPE_GLOBAL);
     JS_Eval(ctx, js_reactive_prolog_src, sizeof(js_reactive_prolog_src) - 1,
             "reactive-prolog.js", JS_EVAL_TYPE_GLOBAL);
     JS_Eval(ctx, js_den_engine_src, sizeof(js_den_engine_src) - 1,
             "den-engine.js", JS_EVAL_TYPE_GLOBAL);
+    JS_Eval(ctx, js_den_runtime_src, sizeof(js_den_runtime_src) - 1,
+            "den-runtime.js", JS_EVAL_TYPE_GLOBAL);
 
     /* Evaluate the JS source */
     JSValue result = JS_Eval(ctx, def->js_source, strlen(def->js_source),
@@ -827,8 +849,9 @@ static void native_child_run(strata_den_def *def,
     local_db_load(&bedrock, def);
     g_bedrock_ctx = &bedrock;
 
-    /* Apply OS sandbox before compiling/running untrusted code */
-    strata_sandbox_apply();
+    /* Apply OS sandbox unless privileged (vocations need network/exec) */
+    if (!def->privileged)
+        strata_sandbox_apply();
 
     TCCState *s = tcc_new();
     if (!s) {
@@ -898,6 +921,41 @@ static strata_den_def *find_den(strata_den_host *host, const char *name) {
     return NULL;
 }
 
+/* Build permit list from den definition */
+static int build_permits(const strata_den_def *def,
+                         strata_msg_permit *permits, int max_permits) {
+    int n = 0;
+    if (def->req_endpoint[0] && n < max_permits) {
+        strncpy(permits[n].endpoint, def->req_endpoint, 255);
+        permits[n].kind = STRATA_CAP_REQ;
+        n++;
+    }
+    if (def->sub_endpoint[0] && n < max_permits) {
+        strncpy(permits[n].endpoint, def->sub_endpoint, 255);
+        permits[n].kind = STRATA_CAP_SUB;
+        n++;
+    }
+    if (def->pub_endpoint[0] && n < max_permits) {
+        strncpy(permits[n].endpoint, def->pub_endpoint, 255);
+        permits[n].kind = STRATA_CAP_PUB;
+        n++;
+    }
+    if (def->rep_endpoint[0] && n < max_permits) {
+        strncpy(permits[n].endpoint, def->rep_endpoint, 255);
+        permits[n].kind = STRATA_CAP_REP;
+        n++;
+    }
+    /* Peer endpoints for den-to-den REQ */
+    for (int i = 0; i < def->peer_count && n < max_permits; i++) {
+        if (def->peer_endpoints[i][0]) {
+            strncpy(permits[n].endpoint, def->peer_endpoints[i], 255);
+            permits[n].kind = STRATA_CAP_REQ;
+            n++;
+        }
+    }
+    return n;
+}
+
 pid_t strata_den_spawn(strata_den_host *host,
                          const char *den_name,
                          const char *event_json, int event_len) {
@@ -927,16 +985,49 @@ pid_t strata_den_spawn(strata_den_host *host,
         }
     }
 
+    /* Build permit list for proxy */
+    strata_msg_permit permits[4 + STRATA_MAX_PEERS];
+    int npermits = build_permits(&local_def, permits,
+                                 4 + STRATA_MAX_PEERS);
+
+    /* First fork: creates the proxy process */
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); return -1; }
 
     if (pid == 0) {
         signal(SIGTERM, SIG_DFL);
         signal(SIGINT, SIG_DFL);
-        if (local_def.mode == STRATA_MODE_JS)
-            js_child_run(&local_def, event_json, event_len);
-        else
-            native_child_run(&local_def, event_json, event_len);
+
+        /* Create kernel pipe between proxy and den */
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+            perror("socketpair");
+            _exit(1);
+        }
+
+        /* Second fork: creates the sandboxed den process */
+        pid_t den_pid = fork();
+        if (den_pid < 0) { perror("fork den"); _exit(1); }
+
+        if (den_pid == 0) {
+            /* === Den process (grandchild) === */
+            close(sv[0]);  /* close proxy end */
+            strata_msg_set_kernel(sv[1]);  /* all msg ops → pipe */
+
+            if (local_def.mode == STRATA_MODE_JS)
+                js_child_run(&local_def, event_json, event_len);
+            else
+                native_child_run(&local_def, event_json, event_len);
+
+            close(sv[1]);
+            _exit(0);
+        }
+
+        /* === Proxy process (child) === */
+        close(sv[1]);  /* close den end */
+        strata_msg_proxy_run(sv[0], permits, npermits);
+        close(sv[0]);
+        waitpid(den_pid, NULL, 0);
         _exit(0);
     }
 
@@ -1006,5 +1097,27 @@ int strata_den_register_js_buf(strata_den_host *host,
     if (!def->js_source) return -1;
 
     host->den_count++;
+    return 0;
+}
+
+int strata_den_add_peer(strata_den_host *host,
+                        const char *den_name,
+                        const char *peer_endpoint) {
+    if (!host || !den_name || !peer_endpoint) return -1;
+    strata_den_def *def = find_den(host, den_name);
+    if (!def) return -1;
+    if (def->peer_count >= STRATA_MAX_PEERS) return -1;
+    strncpy(def->peer_endpoints[def->peer_count], peer_endpoint,
+            sizeof(def->peer_endpoints[0]) - 1);
+    def->peer_count++;
+    return 0;
+}
+
+int strata_den_set_privileged(strata_den_host *host,
+                               const char *den_name, int privileged) {
+    if (!host || !den_name) return -1;
+    strata_den_def *def = find_den(host, den_name);
+    if (!def) return -1;
+    def->privileged = privileged;
     return 0;
 }

@@ -97,4 +97,29 @@ int strata_endpoint_parse(const char *endpoint,
                           char *host_buf, size_t host_cap,
                           int *port);
 
+/* ---- Kernel proxy mode (den sandboxing) ---- */
+
+/* Set kernel pipe fd — all subsequent msg operations go through this
+ * pipe to a proxy process instead of creating real sockets.
+ * Called once in den child process after fork, before sandbox. */
+void strata_msg_set_kernel(int pipe_fd);
+
+/* Capability types for proxy permits */
+#define STRATA_CAP_REQ 1   /* REQ connect */
+#define STRATA_CAP_SUB 2   /* SUB connect */
+#define STRATA_CAP_PUB 3   /* PUB bind */
+#define STRATA_CAP_REP 4   /* REP bind */
+
+typedef struct {
+    char endpoint[256];
+    int kind;
+} strata_msg_permit;
+
+/* Run kernel proxy loop — blocks until den exits (pipe closes).
+ * Called in proxy process with parent end of socketpair.
+ * Only allows operations matching the permit list.
+ * Returns 0 on clean shutdown. */
+int strata_msg_proxy_run(int pipe_fd,
+                         const strata_msg_permit *permits, int npermits);
+
 #endif /* STRATA_MSG_H */

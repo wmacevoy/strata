@@ -55,26 +55,14 @@ int strata_sandbox_apply(void) {
         SC_ALLOW(__NR_readlink),
         SC_ALLOW(__NR_newfstatat),
 
-        /* TCP networking */
-        SC_ALLOW(__NR_socket),
-        SC_ALLOW(__NR_connect),
-        SC_ALLOW(__NR_bind),
-        SC_ALLOW(__NR_sendmsg),
-        SC_ALLOW(__NR_recvmsg),
-        SC_ALLOW(__NR_sendto),
-        SC_ALLOW(__NR_recvfrom),
-        SC_ALLOW(__NR_setsockopt),
-        SC_ALLOW(__NR_getsockopt),
-        SC_ALLOW(__NR_getsockname),
-        SC_ALLOW(__NR_getpeername),
+        /* Networking: denied — all I/O goes through kernel pipe.
+         * socket, connect, bind, sendmsg, recvmsg, sendto, recvfrom,
+         * setsockopt, getsockopt, getsockname, getpeername are all
+         * blocked by the default-kill policy below. */
 
-        /* Polling (TCP transport) */
+        /* Polling (for kernel pipe read/write) */
         SC_ALLOW(__NR_poll),
         SC_ALLOW(__NR_ppoll),
-        SC_ALLOW(__NR_epoll_create1),
-        SC_ALLOW(__NR_epoll_ctl),
-        SC_ALLOW(__NR_epoll_wait),
-        SC_ALLOW(__NR_eventfd2),
 
         /* Time */
         SC_ALLOW(__NR_clock_gettime),
@@ -127,12 +115,14 @@ int strata_sandbox_apply(void) {
 
 int strata_sandbox_apply(void) {
     char *err = NULL;
-    /* Deny fork and exec — the den should not spawn subprocesses */
+    /* Deny fork, exec, and networking — den uses kernel pipe for all I/O */
     const char *profile =
         "(version 1)"
         "(allow default)"
         "(deny process-fork)"
-        "(deny process-exec)";
+        "(deny process-exec)"
+        "(deny network-outbound)"
+        "(deny network-bind)";
 
     if (sandbox_init(profile, 0, &err) != 0) {
         fprintf(stderr, "[sandbox] sandbox_init: %s\n", err);

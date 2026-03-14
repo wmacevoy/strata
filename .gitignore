@@ -56,3 +56,4 @@ dkms.conf
 
 # CMake build directory
 build/
+build_*/

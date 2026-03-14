@@ -5,7 +5,8 @@
 #include <stddef.h>
 #include "strata/store.h"
 
-#define STRATA_MAX_DENS 64
+#define STRATA_MAX_DENS  64
+#define STRATA_MAX_PEERS  8
 
 typedef enum {
     STRATA_MODE_NATIVE,  /* Native C den (TCC compiled, sandboxed) */
@@ -16,6 +17,7 @@ typedef struct strata_den_def {
     char name[64];
     char den_id[256];       /* identity for privilege checks */
     strata_mode mode;
+    int privileged;             /* if true, skip OS sandbox (for vocations) */
     /* Native C mode */
     char c_path[256];
     char *c_source;             /* pre-loaded C source (CoW across forks) */
@@ -29,6 +31,9 @@ typedef struct strata_den_def {
     char req_endpoint[256];
     char pub_endpoint[256];     /* PUB bind endpoint (strata publishes here) */
     char rep_endpoint[256];     /* REP bind endpoint (strata serves API here) */
+    /* Permitted peer endpoints (for den-to-den REQ) */
+    char peer_endpoints[STRATA_MAX_PEERS][256];
+    int peer_count;
 } strata_den_def;
 
 typedef struct strata_den_host strata_den_host;
@@ -84,5 +89,14 @@ int strata_den_register_js_buf(strata_den_host *host,
                                 const char *req_endpoint,
                                 const char *pub_endpoint,
                                 const char *rep_endpoint);
+
+/* Add a permitted peer endpoint for den-to-den REQ connections */
+int strata_den_add_peer(strata_den_host *host,
+                        const char *den_name,
+                        const char *peer_endpoint);
+
+/* Mark a den as privileged (skip OS sandbox — for vocations) */
+int strata_den_set_privileged(strata_den_host *host,
+                               const char *den_name, int privileged);
 
 #endif

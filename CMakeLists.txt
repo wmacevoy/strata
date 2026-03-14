@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 project(strata C)
 
+# Default to RelWithDebInfo; strip NDEBUG so assert() works in tests
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_RELWITHDEBINFO
+       "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_RELEASE
+       "${CMAKE_C_FLAGS_RELEASE}")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -194,6 +203,20 @@ target_include_directories(messenger PRIVATE
 )
 target_link_libraries(messenger strata libcurl_static)
 
+# Anthropic vocation (Claude API client)
+add_library(anthropic_lib OBJECT src/anthropic.c)
+target_include_directories(anthropic_lib PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(anthropic_lib libcurl_static)
+target_compile_definitions(anthropic_lib PRIVATE ANTHROPIC_NO_MAIN)
+
+add_executable(anthropic src/anthropic.c)
+target_include_directories(anthropic PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(anthropic strata libcurl_static)
+
 # Village daemon
 add_executable(village_daemon src/village.c)
 target_include_directories(village_daemon PRIVATE
@@ -243,6 +266,13 @@ target_include_directories(test_messenger PRIVATE
 )
 target_link_libraries(test_messenger strata libcurl_static)
 add_test(NAME test_messenger COMMAND test_messenger WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(test_anthropic test/test_anthropic.c $<TARGET_OBJECTS:anthropic_lib>)
+target_include_directories(test_anthropic PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_anthropic strata libcurl_static)
+add_test(NAME test_anthropic COMMAND test_anthropic WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Claude den test
 add_executable(test_claude test/test_claude.c $<TARGET_OBJECTS:store_service_lib> $<TARGET_OBJECTS:code_smith_lib> $<TARGET_OBJECTS:messenger_lib>)

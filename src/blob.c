@@ -345,9 +345,16 @@ int strata_blob_find(strata_store *store, strata_ctx *ctx,
         const void *blob = sqlite3_column_blob(stmt, 3);
         int blob_len = sqlite3_column_bytes(stmt, 3);
 
+        /* Copy blob before maybe_decrypt — it runs new queries that can
+         * invalidate sqlite3_column_blob's internal buffer */
+        void *blob_copy = malloc(blob_len > 0 ? blob_len : 1);
+        if (!blob_copy) break;
+        if (blob_len > 0) memcpy(blob_copy, blob, blob_len);
+
         /* Decrypt if sealed */
         size_t dec_len = 0;
-        b.content = maybe_decrypt(store, blob, blob_len, b.blob_id, &dec_len);
+        b.content = maybe_decrypt(store, blob_copy, blob_len, b.blob_id, &dec_len);
+        free(blob_copy);
         b.content_len = dec_len;
 
         int keep = cb(&b, userdata);
