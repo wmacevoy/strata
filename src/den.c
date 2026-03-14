@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <sqlite3.h>
 #include <libtcc.h>
+#include <curl/curl.h>
 
 #include "strata/den.h"
 #include "strata/store.h"
@@ -56,6 +57,7 @@ static void bedrock_setup(bedrock_ctx_t *bedrock, strata_den_def *def) {
         if (bedrock->rep_listener)
             strata_msg_set_timeout(bedrock->rep_listener, 5000, -1);
     }
+
 }
 
 static void bedrock_teardown(bedrock_ctx_t *bedrock) {
@@ -468,6 +470,7 @@ static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
     }
 
     const char *target = endpoint ? endpoint : bedrock->req_endpoint;
+
     strata_sock *sock = strata_req_connect(target);
     if (!sock) {
         JS_FreeCString(ctx, req);
@@ -596,6 +599,144 @@ static JSValue js_bedrock_db_exec(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, sqlite3_changes(bedrock->local_db));
 }
 
+/* ------------------------------------------------------------------ */
+/*  bedrock.fetch — direct curl for privileged dens                    */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char *data;
+    size_t size;
+    size_t cap;
+} fetch_buf_t;
+
+static size_t fetch_write_cb(void *contents, size_t size, size_t nmemb,
+                              void *userp) {
+    size_t total = size * nmemb;
+    fetch_buf_t *buf = userp;
+    if (buf->size + total >= buf->cap) {
+        size_t new_cap = buf->cap * 2;
+        if (new_cap < buf->size + total + 1) new_cap = buf->size + total + 1;
+        if (new_cap > 4 * 1024 * 1024) return 0; /* 4MB limit */
+        char *new_data = realloc(buf->data, new_cap);
+        if (!new_data) return 0;
+        buf->data = new_data;
+        buf->cap = new_cap;
+    }
+    memcpy(buf->data + buf->size, contents, total);
+    buf->size += total;
+    buf->data[buf->size] = '\0';
+    return total;
+}
+
+static int curl_initialized = 0;
+
+/* bedrock.fetch(json) -> json response string
+ * Input: {"url":"...", "method":"POST", "headers":["h1","h2"], "body":"..."}
+ * Output: {"ok":true, "status":200, "body":"..."} */
+static JSValue js_bedrock_fetch(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+
+    const char *req_str = JS_ToCString(ctx, argv[0]);
+    if (!req_str) return JS_NULL;
+
+    if (!curl_initialized) {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        curl_initialized = 1;
+    }
+
+    /* Parse request fields */
+    char url[4096] = {0};
+    json_get_string(req_str, "url", url, sizeof(url));
+    if (!url[0]) {
+        JS_FreeCString(ctx, req_str);
+        return JS_NewString(ctx, "{\"ok\":false,\"error\":\"url required\"}");
+    }
+
+    char method[16] = "GET";
+    json_get_string(req_str, "method", method, sizeof(method));
+
+    char *headers[32];
+    int nheaders = json_get_string_array(req_str, "headers", headers, 32);
+
+    char *body = malloc(1024 * 1024 + 1);
+    int body_len = body ? json_get_string(req_str, "body", body, 1024 * 1024) : -1;
+
+    JS_FreeCString(ctx, req_str);
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        free(body);
+        for (int i = 0; i < nheaders; i++) free(headers[i]);
+        return JS_NewString(ctx, "{\"ok\":false,\"error\":\"curl init failed\"}");
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+
+    if (strcmp(method, "POST") == 0) curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    else if (strcmp(method, "PUT") == 0) curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+    else if (strcmp(method, "DELETE") == 0) curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+
+    struct curl_slist *header_list = NULL;
+    for (int i = 0; i < nheaders; i++) {
+        header_list = curl_slist_append(header_list, headers[i]);
+        free(headers[i]);
+    }
+    if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+
+    if (body_len > 0) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
+    }
+
+    fetch_buf_t wbuf = { .data = malloc(4096), .size = 0, .cap = 4096 };
+    if (wbuf.data) wbuf.data[0] = '\0';
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fetch_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wbuf);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    char *resp_buf = malloc(wbuf.size * 2 + 1024);
+    if (!resp_buf) {
+        curl_slist_free_all(header_list);
+        curl_easy_cleanup(curl);
+        free(wbuf.data); free(body);
+        return JS_NewString(ctx, "{\"ok\":false,\"error\":\"oom\"}");
+    }
+
+    if (res != CURLE_OK) {
+        snprintf(resp_buf, wbuf.size * 2 + 1024,
+            "{\"ok\":false,\"error\":\"curl: %s\"}", curl_easy_strerror(res));
+    } else {
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        size_t esc_cap = wbuf.size * 2 + 1;
+        char *escaped = malloc(esc_cap);
+        if (escaped) {
+            int elen = json_escape(wbuf.data, (int)wbuf.size, escaped, (int)esc_cap);
+            snprintf(resp_buf, wbuf.size * 2 + 1024,
+                "{\"ok\":true,\"status\":%ld,\"body\":\"%.*s\"}",
+                http_code, elen, escaped);
+            free(escaped);
+        } else {
+            snprintf(resp_buf, 256, "{\"ok\":false,\"error\":\"oom\"}");
+        }
+    }
+
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    free(wbuf.data);
+    free(body);
+
+    JSValue result = JS_NewString(ctx, resp_buf);
+    free(resp_buf);
+    return result;
+}
+
 /* JS binding: bedrock.db_query(sql) -> JSON string or null */
 static JSValue js_bedrock_db_query(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
@@ -696,6 +837,12 @@ static void js_child_run(strata_den_def *def,
         JS_NewCFunction(ctx, js_bedrock_db_exec, "db_exec", 1));
     JS_SetPropertyStr(ctx, bedrock_obj, "db_query",
         JS_NewCFunction(ctx, js_bedrock_db_query, "db_query", 1));
+
+    /* bedrock.fetch — direct HTTP, only for privileged dens */
+    if (def->privileged) {
+        JS_SetPropertyStr(ctx, bedrock_obj, "fetch",
+            JS_NewCFunction(ctx, js_bedrock_fetch, "fetch", 1));
+    }
 
     JS_SetPropertyStr(ctx, global, "bedrock", bedrock_obj);
 

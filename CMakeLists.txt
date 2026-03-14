@@ -109,7 +109,7 @@ target_include_directories(strata PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
     ${SQLITE3_INCLUDE_DIR}
 )
-target_link_libraries(strata quickjs tcc prolog_core ${SQLITE3_LIBRARY} sodium_static)
+target_link_libraries(strata quickjs tcc prolog_core ${SQLITE3_LIBRARY} sodium_static libcurl_static)
 
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)
@@ -249,6 +249,12 @@ add_executable(warren_village src/warren_village.c
     $<TARGET_OBJECTS:cobbler_lib>
 )
 target_link_libraries(warren_village strata libcurl_static tcc)
+
+# Cisco — tiny village
+add_executable(cisco src/cisco.c
+    $<TARGET_OBJECTS:store_service_lib>
+)
+target_link_libraries(cisco strata libcurl_static)
 
 # Cobbler test
 add_executable(test_cobbler test/test_cobbler.c $<TARGET_OBJECTS:cobbler_lib>)

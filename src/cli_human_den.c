@@ -60,10 +60,10 @@ static int do_request(const char *endpoint, const char *request,
                       char *resp, int resp_cap) {
     strata_sock *sock = strata_req_connect(endpoint);
     if (!sock) return -1;
-    strata_msg_set_timeout(sock, 5000, 5000);
-    int rc = strata_send(sock, request, strlen(request), 0);
+    strata_msg_set_timeout(sock, 120000, 120000);
+    int rc = strata_msg_send(sock, request, strlen(request), 0);
     if (rc < 0) { strata_sock_close(sock); return -1; }
-    rc = strata_recv(sock, resp, resp_cap - 1, 0);
+    rc = strata_msg_recv(sock, resp, resp_cap - 1, 0);
     strata_sock_close(sock);
     if (rc >= 0) resp[rc] = '\0';
     return rc;
