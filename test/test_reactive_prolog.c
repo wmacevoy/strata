@@ -1,7 +1,7 @@
 /*
  * test_reactive_prolog.c — Tests for the reactive Prolog engine.
  *
- * Mirrors the embedded-prolog vending machine test pattern:
+ * Mirrors the wyatt vending machine test pattern:
  * facts as sensors, reactive queries as live values.
  */
 #include <stdio.h>

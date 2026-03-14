@@ -1,7 +1,7 @@
 /*
  * reactive_core.h — Signal/memo/effect runtime in C.
  *
- * Direct translation of embedded-prolog's reactive.py.
+ * Direct translation of wyatt's reactive.py.
  * Signals hold values, memos cache derived computations,
  * effects run side-effects.  Dependency tracking is automatic.
  *

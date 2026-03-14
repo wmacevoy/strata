@@ -29,7 +29,7 @@ Seven components. Everything else is composed from these.
 | libsodium | Encryption. XChaCha20-Poly1305 AEAD for blobs at rest and TCP transport in transit. HKDF-SHA256 for key derivation. SHA-256 for content addressing. |
 | QuickJS | JS den runtime. Stateful serve loops. First-class alongside native C. |
 | TCC | Native C den runtime. Vendored ~100KB compiler. Compiles C to native code, runs in fork-isolated sandbox. |
-| Prolog + Reactive | Inference engine for dens. 32-bit tagged terms, backtracking solver, signal/memo/effect runtime. SUB events auto-wire to Prolog facts. Available in C (vendor/prolog/) and JS (embedded in QuickJS runtime). Ported from embedded-prolog. |
+| Prolog + Reactive | Inference engine for dens. 32-bit tagged terms, backtracking solver, signal/memo/effect runtime. SUB events auto-wire to Prolog facts. Available in C (vendor/prolog/) and JS (embedded in QuickJS runtime). Ported from wyatt. |
 
 Planned but not yet implemented:
 

@@ -1,7 +1,7 @@
 /*
  * reactive_core.c — Signal/memo/effect runtime.
  *
- * Direct C translation of embedded-prolog's reactive.py.
+ * Direct C translation of wyatt's reactive.py.
  * ~100 lines of implementation.  No dependencies beyond C11.
  */
 
