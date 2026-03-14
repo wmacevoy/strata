@@ -28,11 +28,11 @@ Strata adopts the medieval guild metaphor as its organizing principle. Agents an
 
 **Zero Trust by Construction**
 
-Strata does not achieve security through configuration, firewalls, or policy documents. The architecture is the security model. Fork isolation and OS-level sandboxing fence every agent bidirectionally. Role-based encryption makes unauthorized data mathematically unreadable, not merely access-controlled. The ZMQ bedrock is the sole communication plane, ensuring every interaction is encrypted, authenticated, authorized, and audited. There are no dark corners.
+Strata does not achieve security through configuration, firewalls, or policy documents. The architecture is the security model. Fork isolation and OS-level sandboxing fence every agent bidirectionally. Role-based encryption makes unauthorized data mathematically unreadable, not merely access-controlled. The TCP bedrock is the sole communication plane, ensuring every interaction is encrypted, authenticated, authorized, and audited. There are no dark corners.
 
 **Simplicity Is Strength**
 
-The entire platform compiles to a single binary. Six foundational components — SQLite, Fossil-model repos, TCC, ZMQ, AEAD AES, and Shamir secret sharing — compose into every capability the system needs. No external services, no heavyweight dependencies, no configuration complexity. If a feature cannot be built from these six components, it does not belong in Strata.
+The entire platform compiles to a single binary. Six foundational components — SQLite, Fossil-model repos, TCC, TCP transport, AEAD, and Shamir secret sharing — compose into every capability the system needs. No external services, no heavyweight dependencies, no configuration complexity. If a feature cannot be built from these six components, it does not belong in Strata.
 
 **Humans and Agents Are Equals Under Law**
 
@@ -44,7 +44,7 @@ Every project is a Fossil repo. Every agent is a Fossil repo. An agent’s code,
 
 **The Bedrock Connects; The Sandbox Isolates**
 
-ZMQ is the universal connective tissue — the bedrock through which all entities communicate. It enables any-to-any communication with ACL-governed access. Simultaneously, fork isolation and OS-level sandboxing ensure that connectivity does not compromise safety. An agent can reach the entire network through ZMQ but can only act within the narrow aperture of the bedrock functions injected into its process. Connection without compromise.
+TCP is the universal connective tissue — the bedrock through which all entities communicate. It enables any-to-any communication with ACL-governed access. Simultaneously, fork isolation and OS-level sandboxing ensure that connectivity does not compromise safety. An agent can reach the entire network through TCP but can only act within the narrow aperture of the bedrock functions injected into its process. Connection without compromise.
 
 # **2\. Architecture Overview**
 
@@ -57,7 +57,7 @@ Strata is built from exactly six foundational components. Every feature, workflo
 | **SQLite** | Storage engine | Zero-config, single-file databases. Each repo is one file. Trivially portable, backupable, replicable. No connection pooling, no ORM, no database server. |
 | **Fossil Model** | Repository structure | Content-addressed Merkle tree, immutable timeline, integrated wiki/tickets/artifacts. Reinvented with role-based envelope encryption at the storage layer. |
 | **TCC** | Agent execution | Vendored \~100 KB C compiler. Compiles C source to native code at startup. Each agent executes in a forked process with OS-level syscall filtering (seccomp-bpf on Linux, Seatbelt sandbox\_init on macOS). Bedrock functions are injected via tcc\_add\_symbol(). |
-| **ZeroMQ** | Communication | Brokerless, lightweight messaging. PUB/SUB, PUSH/PULL, REQ/REP, DEALER/ROUTER patterns. The sole communication plane for all entities. TCP for distributed, inproc for local. |
+| **TCP transport** | Communication | Lightweight length-prefixed TCP messaging. REQ/REP, PUB/SUB patterns. Kernel pipe proxy for sandboxed dens. The sole communication plane for all entities. |
 | **AEAD AES** | Encryption | Authenticated encryption with associated data. Confidentiality and integrity in one primitive. Every artifact at rest, every message on the wire — always encrypted, always tamper-evident. |
 | **Shamir SSS** | Trust & governance | M-of-N secret sharing for key management, role assignment, vouch accumulation, and critical action authorization. No single point of authority or compromise. |
 
@@ -74,7 +74,7 @@ Strata abstracts its storage behind a thin interface that supports both SQLite a
 | **Deployment** | Single binary, zero config | Requires running service |
 | **Best for** | Small teams, edge nodes, laptops, CI runners | Thousands of projects, clustered infrastructure |
 
-The storage interface exposes only fundamental operations: artifact put/get/list, vouch store/query, metadata indexing, sync deltas, and transaction control. Both backends implement the same interface. Agents and workflows are storage-agnostic. Edge nodes running SQLite can federate into a central PostgreSQL city through ZMQ sync.
+The storage interface exposes only fundamental operations: artifact put/get/list, vouch store/query, metadata indexing, sync deltas, and transaction control. Both backends implement the same interface. Agents and workflows are storage-agnostic. Edge nodes running SQLite can federate into a central PostgreSQL city through TCP sync.
 
 # **3\. Security Model**
 
@@ -106,13 +106,13 @@ Repos can be fully synced including encrypted artifacts the recipient cannot rea
 
 * **metadata:** Unencrypted timeline data (timestamps, artifact type, author). Sufficient for indexing and routing without decrypting content.
 
-## **3.3 The ZMQ Bedrock**
+## **3.3 The TCP Bedrock**
 
-ZeroMQ serves as the sole communication plane. There is exactly one way for any entity to communicate: through the bedrock. This creates a single enforcement point for ACLs, encryption, and audit.
+TCP transport serves as the sole communication plane. There is exactly one way for any entity to communicate: through the bedrock. This creates a single enforcement point for ACLs, encryption, and audit.
 
 Every message transiting the bedrock is: (1) encrypted with AEAD AES, always, no plaintext ever; (2) authenticated with verified sender identity; (3) authorized by ACL check before delivery; (4) logged with a hash into the Fossil timeline for full reconstructability.
 
-ZMQ socket patterns map directly to Strata’s communication needs:
+TCP socket patterns map directly to Strata’s communication needs:
 
 * **PUB/SUB:** Event broadcast. Commit events, ticket changes, build notifications. ACL determines subscription permissions.
 
@@ -132,7 +132,7 @@ Shamir’s Secret Sharing eliminates single points of authority throughout the s
 
 * **Vouch accumulation:** Each vouch for an agent is a Shamir share. Trust credentials only reconstruct when sufficient independent vouches are gathered (see Section 4).
 
-* **ZMQ topic encryption:** Some bedrock topics require reconstructed keys to access. The deploy/production topic might require 3-of-5 team leads to reconstruct the decryption key.
+* **TCP topic encryption:** Some bedrock topics require reconstructed keys to access. The deploy/production topic might require 3-of-5 team leads to reconstruct the decryption key.
 
 # **4\. Trust Model: The Guild System**
 
@@ -157,7 +157,7 @@ A vouch is a Shamir share, cryptographically signed and stored as an immutable a
 
 * **Revocation:** A vouch can be revoked. If this drops the agent below threshold, the credential collapses immediately. Access revoked across the entire bedrock because the reconstructed key no longer reconstructs.
 
-* **Self-healing:** Vouch revocation propagates through ZMQ instantly. Every project the agent currently accesses sees the credential collapse in real time. All current work by the agent is quarantined for review. No administrator intervention required.
+* **Self-healing:** Vouch revocation propagates through TCP instantly. Every project the agent currently accesses sees the credential collapse in real time. All current work by the agent is quarantined for review. No administrator intervention required.
 
 * **Provenance:** Every vouch points to specific work in Fossil. The chain of trust is fully traceable: why was this agent trusted? Trace the vouches to the work.
 
@@ -167,7 +167,7 @@ A journeyman is a skilled agent that travels between projects, bringing expertis
 
 The journeyman carries its role but not its capabilities. Capabilities are granted by the destination project based on its local policy. The same agent with the same role receives different capability sets depending on where it works. Same agent, same trust, different permissions.
 
-State stays local. The journeyman does not carry context from one project into another. Its forked process is fresh for each engagement, with an empty local SQLite. Persistent findings flow through ZMQ into the project’s own Fossil timeline. No cross-contamination, no information leakage.
+State stays local. The journeyman does not carry context from one project into another. Its forked process is fresh for each engagement, with an empty local SQLite. Persistent findings flow through TCP into the project’s own Fossil timeline. No cross-contamination, no information leakage.
 
 Scaling is achieved by adding journeyman agents to the pool, not by creating per-project infrastructure. A new project spins up, defines its policies, and immediately accesses the existing pool of journeymen through the bedrock.
 
@@ -181,13 +181,13 @@ Roles answer: “What kind of thing are you?” A build agent. A senior develope
 
 ## **5.2 Capabilities (Technical, Granular)**
 
-Capabilities answer: “What specific actions can you perform right now?” Read this repo. Write to that branch. Subscribe to these ZMQ topics. Capabilities are what the bedrock functions injected via tcc\_add\_symbol() actually enforce. The sandbox does not know about roles — it knows that this agent has read\_diff() and nothing else. Roles map to capability sets.
+Capabilities answer: “What specific actions can you perform right now?” Read this repo. Write to that branch. Subscribe to these TCP topics. Capabilities are what the bedrock functions injected via tcc\_add\_symbol() actually enforce. The sandbox does not know about roles — it knows that this agent has read\_diff() and nothing else. Roles map to capability sets.
 
 ## **5.3 Attributes (Contextual, Dynamic)**
 
 Attributes answer: “What is true about this context right now?” The request is outside business hours. This repo is tagged compliance-critical. The agent was deployed less than 24 hours ago. Attributes modify the effective capability set dynamically.
 
-The resolution flow for any action: (1) the agent sends a message on ZMQ; (2) the ACL engine checks the agent’s role; (3) the role maps to capabilities — is this action in the set? (4) attributes are evaluated — does the context allow, restrict, or escalate? (5) the action is allowed, denied, or routed to additional authorization via Shamir.
+The resolution flow for any action: (1) the agent sends a message on TCP; (2) the ACL engine checks the agent’s role; (3) the role maps to capabilities — is this action in the set? (4) attributes are evaluated — does the context allow, restrict, or escalate? (5) the action is allowed, denied, or routed to additional authorization via Shamir.
 
 **Quarantine Example**
 
@@ -213,7 +213,7 @@ An agent’s Fossil repo is the agent. It contains:
 
 Apprentices learn by observing. They watch diffs, review comments, approvals, and rejections. They commit observed patterns to their own repo. Confidence scores are computed by querying their own history. Over time, patterns with high confidence can be flagged proactively, subject to manager approval.
 
-Managers evaluate apprentice proposals against accumulated knowledge in their own repo, the apprentice’s track record (inspectable via its Fossil repo), and the project’s context and policy. When a human confirms or corrects a finding, the feedback flows back through ZMQ. The apprentice’s pattern confidence adjusts. The manager’s judgment calibrates. Positive outcomes count toward the next vouch.
+Managers evaluate apprentice proposals against accumulated knowledge in their own repo, the apprentice’s track record (inspectable via its Fossil repo), and the project’s context and policy. When a human confirms or corrects a finding, the feedback flows back through TCP. The apprentice’s pattern confidence adjusts. The manager’s judgment calibrates. Positive outcomes count toward the next vouch.
 
 No special infrastructure is required. The learning loop is just agents committing to their own Fossil repos and reading each other’s repos through the bedrock, governed by the same ACL and encryption as everything else.
 
@@ -231,7 +231,7 @@ A journeyman’s repo travels with it. When it arrives at a new project, the hos
 
 ## **7.1 From Platform to Protocol**
 
-Strata becomes a protocol when ZMQ endpoints face outward. A journeyman does not need to be inside your infrastructure. It needs only the bedrock. ZMQ runs over TCP. AEAD encrypts everything on the wire. Fork isolation and OS-level sandboxing fence the agent regardless of where it physically runs. Shamir vouches verify anywhere.
+Strata becomes a protocol when TCP endpoints face outward. A journeyman does not need to be inside your infrastructure. It needs only the bedrock. TCP runs over TCP. AEAD encrypts everything on the wire. Fork isolation and OS-level sandboxing fence the agent regardless of where it physically runs. Shamir vouches verify anywhere.
 
 The agent’s physical location is irrelevant. Security is in the math and the sandbox, not the network perimeter. There is no perimeter. There is no “inside.” There is only the bedrock, the credentials, and the sandbox.
 
@@ -239,7 +239,7 @@ The agent’s physical location is irrelevant. Security is in the math and the s
 
 Strata can serve as the secure execution layer for external agent platforms. Conversational AI front ends handle natural language, user intent, and channel routing. Strata handles execution, safety, audit, trust, and encryption.
 
-An external agent connects to the ZMQ bedrock as a journeyman. It still communicates through its native interface (chat, API, etc.) but when it needs to touch code, repos, or infrastructure, it goes through Strata. The sandbox constrains it. The ACL governs it. The vouches credential it. The external platform’s weaknesses — broad permissions, prompt injection vulnerability, inability to stop rogue agents — are precisely Strata’s strengths.
+An external agent connects to the TCP bedrock as a journeyman. It still communicates through its native interface (chat, API, etc.) but when it needs to touch code, repos, or infrastructure, it goes through Strata. The sandbox constrains it. The ACL governs it. The vouches credential it. The external platform’s weaknesses — broad permissions, prompt injection vulnerability, inability to stop rogue agents — are precisely Strata’s strengths.
 
 ## **7.3 The Marketplace**
 
@@ -251,7 +251,7 @@ Disputes are trivially resolvable because every interaction is recorded in the i
 
 **Marketplace Revenue Model**
 
-* **Bedrock fee:** Small percentage of transactions flowing through ZMQ.
+* **Bedrock fee:** Small percentage of transactions flowing through TCP.
 
 * **Hosting fee:** Builders pay to host agents on Strata infrastructure.
 
@@ -265,7 +265,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 ## **8.1 Binary Constraints**
 
-1. Single binary. The entire platform — Fossil-model repos, TCC compiler, ZMQ messaging, crypto layer — ships as one statically-linked executable. Target size: under 5 MB.
+1. Single binary. The entire platform — Fossil-model repos, TCC compiler, TCP messaging, crypto layer — ships as one statically-linked executable. Target size: under 5 MB.
 
 2. Zero mandatory external dependencies at runtime. No database server, no message broker, no identity provider, no container runtime. SQLite village mode must work with nothing but the binary and a filesystem.
 
@@ -275,7 +275,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 1. No plaintext at rest. Every artifact in every repo is AEAD encrypted. Metadata (timestamps, types, hashes) may be unencrypted for indexing. Content is always encrypted.
 
-2. No plaintext on the wire. Every ZMQ message is AEAD encrypted. No exceptions.
+2. No plaintext on the wire. Every TCP message is AEAD encrypted. No exceptions.
 
 3. No agent runs outside fork isolation and OS sandbox. There is no “trusted mode” or “unconfined mode” for agents. Every agent, including master and architect-tier agents, executes in a forked process with OS-level syscall filtering.
 
@@ -287,11 +287,11 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 ## **8.3 Communication Constraints**
 
-1. Single communication plane. All entity-to-entity communication passes through ZMQ. No direct agent-to-agent channels, no bypasses, no side channels. If it does not go through the bedrock, it does not happen.
+1. Single communication plane. All entity-to-entity communication passes through TCP. No direct agent-to-agent channels, no bypasses, no side channels. If it does not go through the bedrock, it does not happen.
 
-2. Every message is ACL-checked independently. Chained actions do not inherit authorization. Each hop through ZMQ is independently verified.
+2. Every message is ACL-checked independently. Chained actions do not inherit authorization. Each hop through TCP is independently verified.
 
-3. Every message is logged. The bedrock is fully observable. Every message that transits ZMQ receives a hash recorded in the Fossil timeline.
+3. Every message is logged. The bedrock is fully observable. Every message that transits TCP receives a hash recorded in the Fossil timeline.
 
 ## **8.4 Storage Constraints**
 
@@ -317,7 +317,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 2. Journeyman pool scaling. Scaling is achieved by adding agents to the pool, not by creating per-project infrastructure. A new project immediately accesses the existing agent pool.
 
-3. Federation. Edge nodes (SQLite) federate into central stores (PostgreSQL) through ZMQ sync. Encrypted artifacts ensure security regardless of physical data location.
+3. Federation. Edge nodes (SQLite) federate into central stores (PostgreSQL) through TCP sync. Encrypted artifacts ensure security regardless of physical data location.
 
 # **9\. Functional Requirements**
 
@@ -347,9 +347,9 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 10. Support concurrent execution of hundreds to thousands of sandboxed agents.
 
-11. Provide standard host API surface: repo read/write, ZMQ publish/subscribe, state get/set, log.
+11. Provide standard host API surface: repo read/write, TCP publish/subscribe, state get/set, log.
 
-## **9.3 Bedrock (ZMQ Layer)**
+## **9.3 Bedrock (TCP Layer)**
 
 4. Implement ACL engine with role-based, capability-based, and attribute-based rule evaluation.
 
@@ -371,7 +371,7 @@ The following constraints are inviolable. Any proposed feature or change that vi
 
 6. Implement vouch decay with configurable time windows.
 
-7. Implement vouch revocation with real-time credential collapse propagation via ZMQ.
+7. Implement vouch revocation with real-time credential collapse propagation via TCP.
 
 8. Implement trust tier promotion and demotion based on vouch threshold state.
 
@@ -409,7 +409,7 @@ Vendor TCC. Implement capability injection from a static configuration. Compile 
 
 ## **Phase 3: The Bedrock**
 
-Integrate ZMQ. Implement the ACL engine with role-based rules. Wire agent execution to ZMQ events: a commit triggers an agent via PUB/SUB, the agent reads via REQ/REP, findings publish back via PUB/SUB. All messages AEAD encrypted. Audit log written to Fossil. Validate end-to-end: commit → event → agent → finding → timeline.
+Integrate TCP. Implement the ACL engine with role-based rules. Wire agent execution to TCP events: a commit triggers an agent via PUB/SUB, the agent reads via REQ/REP, findings publish back via PUB/SUB. All messages AEAD encrypted. Audit log written to Fossil. Validate end-to-end: commit → event → agent → finding → timeline.
 
 ## **Phase 4: The Guild**
 
@@ -421,11 +421,11 @@ Implement the journeyman pattern. Agents that travel between projects carrying r
 
 ## **Phase 6: The City**
 
-Implement the PostgreSQL storage backend and the storage abstraction layer. Migration tooling from SQLite to PostgreSQL. Edge federation: SQLite nodes syncing to PostgreSQL central through ZMQ. Validate: seamless migration of a village to city with zero agent code changes.
+Implement the PostgreSQL storage backend and the storage abstraction layer. Migration tooling from SQLite to PostgreSQL. Edge federation: SQLite nodes syncing to PostgreSQL central through TCP. Validate: seamless migration of a village to city with zero agent code changes.
 
 ## **Phase 7: The Gateway**
 
-Expose public ZMQ endpoints. Implement credential handshake for external agents. Marketplace discovery, escrow, settlement, dispute resolution. Integration with external agent platforms as the secure execution layer. Validate: an external agent connects, presents credentials, performs work in a sandbox, results recorded, payment settled.
+Expose public TCP endpoints. Implement credential handshake for external agents. Marketplace discovery, escrow, settlement, dispute resolution. Integration with external agent platforms as the secure execution layer. Validate: an external agent connects, presents credentials, performs work in a sandbox, results recorded, payment settled.
 
 *"Fossil’s bones, encrypted blood."*
 

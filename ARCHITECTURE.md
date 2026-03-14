@@ -1,6 +1,6 @@
 # Architecture — Fossil Strata
 
-Strata is a secure multi-tenant SCM and agent orchestration platform. The foundation is blob storage and ZMQ messaging — not Fossil. Fossil is a human-facing layer near the top, built on blobs and artifacts. Humans and agents are equal villagers: same trust mechanics, same communication plane, same access control.
+Strata is a secure multi-tenant SCM and agent orchestration platform. The foundation is blob storage and TCP messaging — not Fossil. Fossil is a human-facing layer near the top, built on blobs and artifacts. Humans and agents are equal villagers: same trust mechanics, same communication plane, same access control.
 
 ## The Stack
 
@@ -11,8 +11,8 @@ Layer 4: Dens           — sandboxed execution, bedrock API, preserve/restore
   └─ Prolog + Reactive  — inference engine, reactive queries, auto-wired events
 Layer 3: Services       — store_service JSON bridge, village daemon
 Layer 2: Store          — repos, roles, entities, privileges
-Layer 1: Blob + Message — content-addressed blobs, ZMQ messaging
-Layer 0: Foundation     — SQLite, ZMQ, QuickJS, TCC, Prolog
+Layer 1: Blob + Message — content-addressed blobs, TCP messaging
+Layer 0: Foundation     — SQLite, TCP transport, QuickJS, TCC, libsodium, Prolog
 ```
 
 ---
@@ -25,8 +25,8 @@ Seven components. Everything else is composed from these.
 |-----------|------|
 | SQLite / PostgreSQL | Village store engine. SQLite for single-machine villages, PostgreSQL for city-scale. Same interface, swappable. |
 | SQLite | Den local storage. Permanent choice — every den gets its own SQLite db. Not swappable. |
-| ZeroMQ | Communication. Brokerless messaging. REQ/REP, PUB/SUB. The sole communication plane. |
-| libsodium | Encryption. XChaCha20-Poly1305 AEAD for blobs at rest and ZMQ transport in transit. HKDF-SHA256 for key derivation. SHA-256 for content addressing. |
+| TCP transport | Communication. Lightweight length-prefixed TCP messaging. REQ/REP, PUB/SUB patterns. Kernel pipe proxy for sandboxed dens. |
+| libsodium | Encryption. XChaCha20-Poly1305 AEAD for blobs at rest and TCP transport in transit. HKDF-SHA256 for key derivation. SHA-256 for content addressing. |
 | QuickJS | JS den runtime. Stateful serve loops. First-class alongside native C. |
 | TCC | Native C den runtime. Vendored ~100KB compiler. Compiles C to native code, runs in fork-isolated sandbox. |
 | Prolog + Reactive | Inference engine for dens. 32-bit tagged terms, backtracking solver, signal/memo/effect runtime. SUB events auto-wire to Prolog facts. Available in C (vendor/prolog/) and JS (embedded in QuickJS runtime). Ported from embedded-prolog. |
@@ -43,7 +43,7 @@ Planned but not yet implemented:
 
 ## Layer 1 — Blob + Message Store
 
-The foundation of all persistence and communication. Everything above is built on blobs and ZMQ messages.
+The foundation of all persistence and communication. Everything above is built on blobs and TCP messages.
 
 ### Blobs
 
@@ -68,7 +68,7 @@ WHERE bt.tag IN (?, ?) GROUP BY b.blob_id HAVING COUNT(DISTINCT bt.tag) = 2
 
 Key functions (`blob.c`): `strata_blob_put`, `strata_blob_get`, `strata_blob_find`, `strata_blob_tag`, `strata_blob_untag`.
 
-### ZMQ Messaging
+### TCP Messaging
 
 Four socket patterns, used everywhere:
 
@@ -77,14 +77,14 @@ Four socket patterns, used everywhere:
 | REQ/REP | REQ connects → REP binds | Synchronous request/response (store queries, den API) | AEAD encrypted |
 | PUB/SUB | PUB binds → SUB connects | Event broadcast (artifact changes, den notifications) | Plaintext |
 
-Every entity communicates through ZMQ. No direct database access from dens or CLIs (except `strata --db init` for bootstrap).
+Every entity communicates through TCP. No direct database access from dens or CLIs (except `strata --db init` for bootstrap).
 
-**Transport encryption** is message-level AEAD, not ZMQ CURVE. Each REQ/REP frame is sealed with XChaCha20-Poly1305 using a transport key derived from the bedrock key (`HKDF-SHA256(bedrock, "zmq-transport")`). The `strata_zmq_send/recv` wrappers handle this transparently. PUB/SUB stays plaintext because ZMQ subscription filtering requires readable topic prefixes; payloads on PUB/SUB are metadata (repo IDs, artifact types), not sensitive content. When no bedrock key is configured, transport falls back to plaintext.
+**Transport encryption** is message-level AEAD, not TCP CURVE. Each REQ/REP frame is sealed with XChaCha20-Poly1305 using a transport key derived from the bedrock key (`HKDF-SHA256(bedrock, "tcp-transport")`). The `strata_send/recv` wrappers handle this transparently. PUB/SUB stays plaintext because TCP subscription filtering requires readable topic prefixes; payloads on PUB/SUB are metadata (repo IDs, artifact types), not sensitive content. When no bedrock key is configured, transport falls back to plaintext.
 
 ### To extend Layer 1
 
 - New blob operations: add to `blob.c` + `store.h`, wire into `store_service.c` JSON dispatch
-- New message patterns: add ZMQ socket to relevant component, document endpoint
+- New message patterns: add TCP socket to relevant component, document endpoint
 
 ---
 
@@ -123,7 +123,7 @@ Entities register with a token. Token is SHA-256 hashed at rest. Authentication 
 
 ### Change Notifications
 
-`artifact_put()` triggers a ZMQ PUB message:
+`artifact_put()` triggers a TCP PUB message:
 ```
 Topic: "change/{repo_id}/{artifact_type}"
 Payload: {"repo_id":"...", "artifact_id":"...", "change":"create", "author":"..."}
@@ -144,7 +144,7 @@ Processes that bridge layers. Dens and CLIs talk to services; services talk to t
 
 ### store_service
 
-ZMQ REP listener. Receives JSON, dispatches to store, returns JSON. This is how all dens and CLIs access the database.
+TCP REP listener. Receives JSON, dispatches to store, returns JSON. This is how all dens and CLIs access the database.
 
 **Protocol** — every request has an `action` field:
 
@@ -167,7 +167,7 @@ Key file: `store_service.c`.
 
 Listens for remote clone requests. Receives a den definition (source + event), spawns it locally, returns endpoints. Enables den migration between villages.
 
-**Remote clone frame protocol** (3-frame ZMQ multipart):
+**Remote clone frame protocol** (3-frame TCP multipart):
 1. Header JSON: `{"action":"clone", "den_name":"...", "mode":"js", "origin_req":"..."}`
 2. Den source: JS text or C source
 3. Event JSON: initial payload
@@ -179,7 +179,7 @@ Key file: `village.c`.
 ### To extend Layer 3
 
 - New store_service action: add case to `handle_request()` in `store_service.c`
-- New service type: follow `store_service.c` or `code_smith.c` pattern (ZMQ REP loop + JSON dispatch + signal handling)
+- New service type: follow `store_service.c` or `code_smith.c` pattern (TCP REP loop + JSON dispatch + signal handling)
 
 ---
 
@@ -277,7 +277,7 @@ Preserve on close: village sends close request, den responds by serializing its 
 
 **Relocating is a vocation.** claude-homestead's `deploy_den` becomes: preserve a den in village A, transport the blob, restore it in village B.
 
-**2. Journeyman** — Den stays alive, works remotely via relay. No death/rebirth cycle. The relay bridges ZMQ sockets across villages. State stays in the running process. No preserve needed.
+**2. Journeyman** — Den stays alive, works remotely via relay. No death/rebirth cycle. The relay bridges TCP sockets across villages. State stays in the running process. No preserve needed.
 
 **3. Local Persistence** — Den's local SQLite survives restarts automatically via the blob save/load cycle. The den doesn't need to do anything special — bedrock handles it.
 
@@ -436,7 +436,7 @@ Key file: `dens/claude-homestead.js`.
 
 ### cobbler
 
-C source validator vocation. Validates that C source compiles correctly using vendored TCC. Same pattern as code-smith: ZMQ REP loop, JSON dispatch.
+C source validator vocation. Validates that C source compiles correctly using vendored TCC. Same pattern as code-smith: TCP REP loop, JSON dispatch.
 
 ```
 C source → cobbler (TCC) → validation result
@@ -487,7 +487,7 @@ The guide describes "Everything Is a Fossil Repo." The reality is: everything is
 
 ---
 
-## ZMQ Topology
+## TCP Topology
 
 ```
   ┌─────────────────────────────────────────────────┐
@@ -556,24 +556,24 @@ Plaintext ───seal──→ "AE02" (4) ║ nonce (24) ║ ciphertext+tag (N
 
 Key files: `aead.c`, `aead.h`, `blob.c`.
 
-### In Transit — ZMQ Transport Encryption
+### In Transit — TCP Transport Encryption
 
 REQ/REP channels carry sensitive data (store queries, den API calls, vocation requests). These are encrypted at the message level using the same AEAD primitive.
 
 ```
-Bedrock Key ──HKDF("zmq-transport")──→ Transport Key (cached, derived once)
+Bedrock Key ──HKDF("transport")──→ Transport Key (cached, derived once)
                                             │
-zmq_send(msg) → strata_zmq_send(msg) → seal(msg) → zmq_send(sealed)
-zmq_recv()    → strata_zmq_recv()    → zmq_recv(sealed) → open(sealed) → msg
+strata_send(msg) → seal(msg) → strata_msg_send(sealed)
+strata_recv()    → strata_msg_recv(sealed) → open(sealed) → msg
 ```
 
 | Channel | Encrypted | Reason |
 |---------|-----------|--------|
 | REQ/REP (store, den API, vocations) | Yes | Carries artifacts, blobs, credentials |
-| PUB/SUB (change events, notifications) | No | ZMQ topic filtering requires readable prefixes; payloads are metadata |
+| PUB/SUB (change events, notifications) | No | TCP topic filtering requires readable prefixes; payloads are metadata |
 | Relay (village-to-village forwarding) | No | Transparent byte proxy; inner messages are already sealed |
 
-**Backward compatible:** `strata_zmq_recv` auto-detects plaintext (no `"AE02"` header) and passes it through. This allows mixed encrypted/unencrypted development.
+**Backward compatible:** `strata_recv` auto-detects plaintext (no `"AE02"` header) and passes it through. This allows mixed encrypted/unencrypted development.
 
 ### Content Addressing
 
@@ -597,10 +597,10 @@ Dens don't talk directly to each other. Two patterns:
 
 | Layer | Implemented | Planned |
 |-------|-------------|---------|
-| 0: Foundation | SQLite, ZMQ, QuickJS, TCC, libsodium, Prolog+Reactive | — |
+| 0: Foundation | SQLite, TCP, QuickJS, TCC, libsodium, Prolog+Reactive | — |
 | 1: Blob + Message | Blob CRUD, tag search, role filtering, AEAD at rest, AEAD transport | — |
 | 2: Store | Repos, artifacts, roles, privileges, entity auth | Shamir trust tiers, vouch system, attribute engine |
-| 3: Services | store_service, village daemon, code-smith | ACL enforcement on ZMQ |
+| 3: Services | store_service, village daemon, code-smith | ACL enforcement on TCP |
 | 4: Dens | JS + native C runtimes, bedrock API, basic local_db save/load, Prolog inference + reactive queries, auto-wired SUB→fact bridge | Rich preserve (source + state + restore plan), quarantine |
 | 5: Vocations | code-smith, claude-homestead, cobbler | word-smith, mail-smith |
 | 6: Fossil | strata-human REPL, basic artifact browsing | Full timeline/diff/branch UI |
