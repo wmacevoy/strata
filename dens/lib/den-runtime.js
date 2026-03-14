@@ -3,18 +3,8 @@
 //
 // A den is a reactive Prolog state. Messages are invisible
 // infrastructure: facts flow in (accept), signals flow out.
-// The serve loop, JSON plumbing, and persistence are handled here.
-//
-// State = the Prolog clause database. Program clauses (from load())
-// are code — always fresh from source. Runtime facts (from assert,
-// updateFact, or Prolog assert/1) are state — persisted automatically
-// to per-den SQLite and restored on next startup.
-//
-// Usage:
-//   var den = createDen({name: "gee"});
-//   den.load("is_curious(gee).\n");
-//   den.on("say", function(req) { ... });
-//   den.run();
+// The serve loop, JSON plumbing, persistence, and POST are
+// handled here.
 //
 // Portable: same var-only style as reactive.js / prolog-engine.js
 // ============================================================
@@ -26,10 +16,11 @@ function createDen(opts) {
 
   var de = createDenEngine(new PrologEngine());
   var _handlers = {};
-  var _programSize = 0;  // clauses from load() — not persisted
+  var _programSize = 0;
   var _restored = false;
+  var _postResults = null;
 
-  // --- SQL escaping for state persistence ---
+  // --- SQL escaping ---
 
   function _sqlEscape(s) {
     return s.replace(/'/g, "''");
@@ -65,7 +56,6 @@ function createDen(opts) {
     );
     var rows = JSON.parse(raw);
     if (rows.length === 0) return 0;
-
     var clauses = JSON.parse(rows[0].clauses);
     for (var i = 0; i < clauses.length; i++) {
       de.engine.addClause(clauses[i].head, clauses[i].body);
@@ -73,7 +63,7 @@ function createDen(opts) {
     return clauses.length;
   }
 
-  // --- load: Prolog text → engine clauses (program, not state) ---
+  // --- load ---
 
   function load(text) {
     var n = loadString(de.engine, text);
@@ -81,21 +71,17 @@ function createDen(opts) {
     return n;
   }
 
-  // --- on: register JS handler for an action ---
+  // --- on ---
 
   function on(action, fn) {
     _handlers[action] = fn;
   }
 
-  // --- Prolog-based handler via handle/1 + send/2 ---
+  // --- Prolog handle/1 + send/2 ---
 
   function _prologHandle(action, req) {
-    if (req.from !== undefined) {
-      de.updateFact("from", [], [req.from]);
-    }
-    if (req.message !== undefined) {
-      de.updateFact("message", [], [req.message]);
-    }
+    if (req.from !== undefined) de.updateFact("from", [], [req.from]);
+    if (req.message !== undefined) de.updateFact("message", [], [req.message]);
     de.updateFact("request", [], [action]);
     de.bump();
 
@@ -107,7 +93,6 @@ function createDen(opts) {
     for (var i = 0; i < result.sends.length; i++) {
       var s = result.sends[i];
       var targetName = s.target.type === "atom" ? s.target.name : termToString(s.target);
-
       if (targetName === "respond" && response === null) {
         response = _termToResponse(s.fact);
       } else if (targetName === "publish") {
@@ -120,17 +105,12 @@ function createDen(opts) {
     de.engine.retractFirst(PrologEngine.compound("request", [PrologEngine.variable("_")]));
     de.engine.retractFirst(PrologEngine.compound("from", [PrologEngine.variable("_")]));
     de.engine.retractFirst(PrologEngine.compound("message", [PrologEngine.variable("_")]));
-
     return response;
   }
 
   function _termToResponse(term) {
-    if (term.type === "atom") {
-      return {ok: true, from: name, response: term.name};
-    }
-    if (term.type === "num") {
-      return {ok: true, from: name, response: term.value};
-    }
+    if (term.type === "atom") return {ok: true, from: name, response: term.name};
+    if (term.type === "num") return {ok: true, from: name, response: term.value};
     if (term.type === "compound") {
       var obj = {ok: true, from: name};
       if (term.functor === "error") {
@@ -154,7 +134,95 @@ function createDen(opts) {
     }
   }
 
-  // --- init: restore state from per-den SQLite ---
+  // --- POST (Power On Self Test) ---
+
+  function _post() {
+    var results = [];
+    var failed = 0;
+
+    function check(testName, fn) {
+      try {
+        var ok = fn();
+        results.push({test: testName, ok: ok});
+        if (!ok) failed++;
+      } catch (e) {
+        results.push({test: testName, ok: false, error: e.message});
+        failed++;
+      }
+    }
+
+    // Configuration
+    check("name", function() { return name && name.length > 0; });
+    check("engine", function() { return de && de.engine && de.engine.clauses; });
+
+    // Database
+    check("db_exec", function() {
+      bedrock.db_exec("CREATE TABLE IF NOT EXISTS _post (id INTEGER PRIMARY KEY)");
+      return true;
+    });
+    check("db_query", function() {
+      var rows = bedrock.db_query("SELECT 1 as v");
+      var parsed = JSON.parse(rows);
+      return parsed.length === 1 && parsed[0].v === 1;
+    });
+
+    // State persistence
+    check("state_table", function() {
+      var rows = JSON.parse(bedrock.db_query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='_prolog_state'"
+      ));
+      return rows.length === 1;
+    });
+
+    // Store (if configured)
+    check("store", function() {
+      var resp = bedrock.request(JSON.stringify({action: "init"}));
+      if (!resp) return false;
+      var data = JSON.parse(resp);
+      return data.ok === true;
+    });
+
+    // Prolog engine
+    check("prolog", function() {
+      var eng = new PrologEngine();
+      loadString(eng, "test(ok).\n");
+      var r = eng.queryFirst(PrologEngine.compound("test", [PrologEngine.variable("X")]));
+      return r && r.args[0].name === "ok";
+    });
+
+    // Parser
+    check("parser", function() {
+      var t = parseTerm("hello(world)");
+      return t.type === "compound" && t.functor === "hello";
+    });
+
+    // Fetch (privileged only)
+    if (typeof bedrock.fetch === "function") {
+      check("fetch", function() {
+        return true; // fetch is available
+      });
+    }
+
+    // Report
+    var total = results.length;
+    _postResults = {total: total, failed: failed, results: results};
+
+    if (failed > 0) {
+      bedrock.log(name + " POST: " + (total - failed) + "/" + total + " passed, " + failed + " FAILED");
+      for (var i = 0; i < results.length; i++) {
+        if (!results[i].ok) {
+          bedrock.log(name + " POST FAIL: " + results[i].test +
+            (results[i].error ? " (" + results[i].error + ")" : ""));
+        }
+      }
+    } else {
+      bedrock.log(name + " POST: " + total + "/" + total + " passed");
+    }
+
+    return failed === 0;
+  }
+
+  // --- init ---
 
   function _init() {
     _initStateTable();
@@ -163,12 +231,12 @@ function createDen(opts) {
       _restored = true;
       bedrock.log(name + " restored " + n + " facts");
     }
+    _post();
   }
 
-  // Initialize immediately
   _init();
 
-  // --- run: the invisible loop ---
+  // --- run ---
 
   function run() {
     for (var i = 0; i < subscriptions.length; i++) {
@@ -186,7 +254,6 @@ function createDen(opts) {
       var raw = bedrock.serve_recv();
       if (raw === null) {
         nulls++;
-        // In bounded mode (maxRequests > 0), exit if no traffic
         if (maxRequests > 0 && nulls > 3) break;
         continue;
       }
@@ -197,7 +264,11 @@ function createDen(opts) {
         var req = JSON.parse(raw);
         var action = req.action || "unknown";
 
-        if (_handlers[action]) {
+        // Built-in POST action
+        if (action === "post") {
+          _post();
+          response = _postResults;
+        } else if (_handlers[action]) {
           response = _handlers[action](req);
         } else {
           response = _prologHandle(action, req);
@@ -213,7 +284,6 @@ function createDen(opts) {
       count++;
     }
 
-    // Persist state before exit
     var saved = _saveState();
     bedrock.log(name + " stopped (" + count + " requests, " + saved + " facts saved)");
   }
@@ -222,6 +292,7 @@ function createDen(opts) {
     engine: de.engine,
     reactive: de,
     restored: _restored,
+    post: _postResults,
     load: load,
     on: on,
     save: _saveState,

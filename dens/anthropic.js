@@ -79,7 +79,10 @@ function call_api(req) {
 // --- Handlers ---
 
 den.on("ask", function(req) {
-  return call_api(req);
+  bedrock.log("anthropic: got ask request");
+  var result = call_api(req);
+  bedrock.log("anthropic: ask done, ok=" + result.ok);
+  return result;
 });
 
 den.on("models", function() {

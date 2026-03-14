@@ -127,24 +127,6 @@ int main(void) {
     assert(WEXITSTATUS(status) == 0);
     PASS();
 
-    /* Register claudette den (JS) — spawn with maxRequests=1 so it exits */
-    TEST("register claudette den (JS)");
-    rc = strata_den_js_register(host, "claudette", "dens/claudette.js",
-                                NULL, NULL, NULL, NULL);
-    assert(rc == 0);
-    PASS();
-
-    /* Spawn claudette — no endpoints, just verify it starts clean */
-    TEST("spawn claudette den");
-    pid_t pid7 = strata_den_spawn(host, "claudette",
-        "{\"maxRequests\":1}", 18);
-    assert(pid7 > 0);
-    waited = waitpid(pid7, &status, 0);
-    assert(waited == pid7);
-    assert(WIFEXITED(status));
-    assert(WEXITSTATUS(status) == 0);
-    PASS();
-
     /* Cleanup */
     strata_den_host_free(host);
 

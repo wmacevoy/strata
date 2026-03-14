@@ -473,6 +473,7 @@ static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
 
     strata_sock *sock = strata_req_connect(target);
     if (!sock) {
+        fprintf(stderr, "[bedrock] connect failed: %s\n", target);
         JS_FreeCString(ctx, req);
         if (endpoint) JS_FreeCString(ctx, endpoint);
         return JS_NULL;
@@ -484,19 +485,26 @@ static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
     else
         strata_msg_set_timeout(sock, 5000, 5000);
 
-    int rc = strata_send(sock, req, strlen(req), 0);
+    /* Use plain msg framing through the proxy (not AEAD) */
+    int rc = strata_msg_send(sock, req, strlen(req), 0);
     JS_FreeCString(ctx, req);
     if (endpoint) JS_FreeCString(ctx, endpoint);
-    if (rc < 0) { strata_sock_close(sock); return JS_NULL; }
+    if (rc < 0) {
+        fprintf(stderr, "[bedrock] send failed to %s\n", target);
+        strata_sock_close(sock); return JS_NULL;
+    }
 
     /* Dynamic receive buffer — peer responses (e.g. API calls) can be large */
     size_t buf_cap = (argc >= 2) ? (4 * 1024 * 1024) : 8192;
     char *resp = malloc(buf_cap);
     if (!resp) { strata_sock_close(sock); return JS_NULL; }
 
-    rc = strata_recv(sock, resp, buf_cap - 1, 0);
+    rc = strata_msg_recv(sock, resp, buf_cap - 1, 0);
     strata_sock_close(sock);
-    if (rc < 0) { free(resp); return JS_NULL; }
+    if (rc < 0) {
+        fprintf(stderr, "[bedrock] recv failed from %s (buf_cap=%zu)\n", target, buf_cap);
+        free(resp); return JS_NULL;
+    }
     resp[rc] = '\0';
     JSValue result = JS_NewString(ctx, resp);
     free(resp);
@@ -509,6 +517,12 @@ static JSValue js_bedrock_serve_recv(JSContext *ctx, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
     if (!bedrock || !bedrock->rep_listener) return JS_NULL;
+
+    /* Close previous client (deferred from serve_send to avoid close/recv race) */
+    if (bedrock->rep_client) {
+        strata_sock_close(bedrock->rep_client);
+        bedrock->rep_client = NULL;
+    }
 
     /* Accept a new client connection */
     strata_sock *client = strata_rep_accept(bedrock->rep_listener);
@@ -536,10 +550,10 @@ static JSValue js_bedrock_serve_send(JSContext *ctx, JSValueConst this_val,
     const char *resp = JS_ToCString(ctx, argv[0]);
     if (!resp) return JS_NewInt32(ctx, -1);
 
-    int rc = strata_send(bedrock->rep_client, resp, strlen(resp), 0);
+    int rc = strata_msg_send(bedrock->rep_client, resp, strlen(resp), 0);
     JS_FreeCString(ctx, resp);
-    strata_sock_close(bedrock->rep_client);
-    bedrock->rep_client = NULL;
+    /* Don't close here — let serve_recv close the previous client.
+     * Closing immediately races with the peer's recv on macOS. */
     return JS_NewInt32(ctx, rc);
 }
 
