@@ -18,7 +18,20 @@ add_subdirectory(vendor/sqlite EXCLUDE_FROM_ALL)
 set(SQLITE3_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/sqlite")
 set(SQLITE3_LIBRARY sqlite3_static)
 
-# Prolog core + solver + reactive runtime (vendored)
+# y8 engine (from wyatt — reactive Prolog + persist + SQLite)
+add_library(y8
+    vendor/wyatt/native/y8.c
+    vendor/wyatt/native/y8_qjson.c
+    vendor/wyatt/native/prolog_core.c
+)
+target_include_directories(y8 PUBLIC
+    vendor/wyatt/native
+    vendor/quickjs
+)
+target_include_directories(y8 PRIVATE ${SQLITE3_INCLUDE_DIR})
+target_compile_options(y8 PRIVATE -w)
+
+# Legacy prolog_core for C-level tests (reactive, solver)
 add_library(prolog_core
     vendor/prolog/prolog_core.c
     vendor/prolog/prolog_solver.c
@@ -107,9 +120,10 @@ target_include_directories(strata PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/quickjs
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tcc
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/wyatt/native
     ${SQLITE3_INCLUDE_DIR}
 )
-target_link_libraries(strata quickjs tcc prolog_core ${SQLITE3_LIBRARY} sodium_static libcurl_static)
+target_link_libraries(strata y8 quickjs tcc prolog_core ${SQLITE3_LIBRARY} sodium_static libcurl_static)
 
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)

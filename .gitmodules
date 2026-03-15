@@ -1,0 +1,9 @@
+[submodule "vendor/sqlcipher"]
+	path = vendor/sqlcipher
+	url = https://github.com/sqlcipher/sqlcipher.git
+[submodule "vendor/libressl"]
+	path = vendor/libressl
+	url = https://github.com/libressl/portable.git
+[submodule "vendor/wyatt"]
+	path = vendor/wyatt
+	url = ../wyatt
