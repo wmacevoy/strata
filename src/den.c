@@ -14,7 +14,8 @@
 #include "strata/msg.h"
 #include "strata/aead.h"
 #include "strata/json_util.h"
-#include "prolog_js_embed.h"
+#include "strata/y8_ext.h"
+#include "y8.h"
 #include "den_engine_js_embed.h"
 
 /* ------------------------------------------------------------------ */
@@ -32,6 +33,9 @@ typedef struct {
     char den_entity[256];
     char local_db_path[256];
 } bedrock_ctx_t;
+
+/* Global bedrock pointer — used by JS callbacks when y8 owns the context opaque */
+static bedrock_ctx_t *g_js_bedrock = NULL;
 
 /* ------------------------------------------------------------------ */
 /*  Socket setup helpers                                               */
@@ -430,7 +434,7 @@ static JSValue js_bedrock_log(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_publish(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || !bedrock->pub_hub || argc < 2) return JS_NewInt32(ctx, -1);
 
     const char *topic = JS_ToCString(ctx, argv[0]);
@@ -452,7 +456,7 @@ static JSValue js_bedrock_publish(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || argc < 1) return JS_NULL;
 
     const char *req = JS_ToCString(ctx, argv[0]);
@@ -515,7 +519,7 @@ static JSValue js_bedrock_request(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_serve_recv(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || !bedrock->rep_listener) return JS_NULL;
 
     /* Close previous client (deferred from serve_send to avoid close/recv race) */
@@ -544,7 +548,7 @@ static JSValue js_bedrock_serve_recv(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_serve_send(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || !bedrock->rep_client || argc < 1) return JS_NewInt32(ctx, -1);
 
     const char *resp = JS_ToCString(ctx, argv[0]);
@@ -561,7 +565,7 @@ static JSValue js_bedrock_serve_send(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_subscribe(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
     (void)this_val;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || !bedrock->sub_sock || argc < 1) return JS_NewInt32(ctx, -1);
 
     const char *filter = JS_ToCString(ctx, argv[0]);
@@ -576,7 +580,7 @@ static JSValue js_bedrock_subscribe(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_receive(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || !bedrock->sub_sock) return JS_NULL;
 
     char topic[512] = {0};
@@ -596,7 +600,7 @@ static JSValue js_bedrock_receive(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_db_exec(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || !bedrock->local_db || argc < 1) return JS_NULL;
 
     const char *sql = JS_ToCString(ctx, argv[0]);
@@ -755,7 +759,7 @@ static JSValue js_bedrock_fetch(JSContext *ctx, JSValueConst this_val,
 static JSValue js_bedrock_db_query(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
     (void)this_val;
-    bedrock_ctx_t *bedrock = JS_GetContextOpaque(ctx);
+    bedrock_ctx_t *bedrock = g_js_bedrock;
     if (!bedrock || !bedrock->local_db || argc < 1) return JS_NULL;
 
     const char *sql = JS_ToCString(ctx, argv[0]);
@@ -825,11 +829,20 @@ static void js_child_run(strata_den_def *def,
     if (!def->privileged)
         strata_sandbox_apply();
 
-    JSRuntime *rt = JS_NewRuntime();
-    JSContext *ctx = JS_NewContext(rt);
-    JS_SetContextOpaque(ctx, &bedrock);
+    /* y8 engine: QuickJS + Prolog + persist + fossilize — all in one */
+    y8_t *engine = y8_open(bedrock.local_db_path[0] ? bedrock.local_db_path : NULL);
+    if (!engine) {
+        fprintf(stderr, "[js] y8_open failed\n");
+        bedrock_teardown(&bedrock);
+        return;
+    }
 
-    /* Create bedrock global object */
+    /* Make bedrock available to JS callbacks via global pointer
+     * (y8 owns the context opaque for its own SQLite bindings) */
+    g_js_bedrock = &bedrock;
+    JSContext *ctx = y8_get_context(engine);
+
+    /* Add bedrock bindings to y8's QuickJS context */
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue bedrock_obj = JS_NewObject(ctx);
 
@@ -868,23 +881,13 @@ static void js_child_run(strata_den_def *def,
 
     JS_FreeValue(ctx, global);
 
-    /* Pre-load Prolog engine + parser + den-engine */
-    JS_Eval(ctx, js_reactive_src, sizeof(js_reactive_src) - 1,
-            "reactive.js", JS_EVAL_TYPE_GLOBAL);
-    JS_Eval(ctx, js_prolog_engine_src, sizeof(js_prolog_engine_src) - 1,
-            "prolog-engine.js", JS_EVAL_TYPE_GLOBAL);
-    JS_Eval(ctx, js_parser_src, sizeof(js_parser_src) - 1,
-            "parser.js", JS_EVAL_TYPE_GLOBAL);
-    JS_Eval(ctx, js_load_string_src, sizeof(js_load_string_src) - 1,
-            "load-string.js", JS_EVAL_TYPE_GLOBAL);
-    JS_Eval(ctx, js_reactive_prolog_src, sizeof(js_reactive_prolog_src) - 1,
-            "reactive-prolog.js", JS_EVAL_TYPE_GLOBAL);
+    /* Load strata-specific JS (den-engine + den-runtime) on top of y8's modules */
     JS_Eval(ctx, js_den_engine_src, sizeof(js_den_engine_src) - 1,
             "den-engine.js", JS_EVAL_TYPE_GLOBAL);
     JS_Eval(ctx, js_den_runtime_src, sizeof(js_den_runtime_src) - 1,
             "den-runtime.js", JS_EVAL_TYPE_GLOBAL);
 
-    /* Evaluate the JS source */
+    /* Evaluate the den's JS source */
     JSValue result = JS_Eval(ctx, def->js_source, strlen(def->js_source),
                              def->js_path, JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(result)) {
@@ -896,8 +899,8 @@ static void js_child_run(strata_den_def *def,
     }
     JS_FreeValue(ctx, result);
 
-    JS_FreeContext(ctx);
-    JS_FreeRuntime(rt);
+    y8_close(engine);
+    g_js_bedrock = NULL;
     local_db_save(&bedrock);
     bedrock_teardown(&bedrock);
 }
