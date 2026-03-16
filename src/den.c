@@ -532,16 +532,20 @@ static JSValue js_bedrock_serve_recv(JSContext *ctx, JSValueConst this_val,
     strata_sock *client = strata_rep_accept(bedrock->rep_listener);
     if (!client) return JS_NULL;
 
-    char buf[8192];
-    int rc = strata_recv(client, buf, sizeof(buf) - 1, 0);
+    char *buf = malloc(256 * 1024);  /* 256KB for incoming requests */
+    if (!buf) { strata_sock_close(client); return JS_NULL; }
+    int rc = strata_recv(client, buf, 256 * 1024 - 1, 0);
     if (rc < 0) {
+        free(buf);
         strata_sock_close(client);
         return JS_NULL;
     }
     buf[rc] = '\0';
     /* Store client for the subsequent serve_send */
     bedrock->rep_client = client;
-    return JS_NewString(ctx, buf);
+    JSValue result = JS_NewString(ctx, buf);
+    free(buf);
+    return result;
 }
 
 /* JS binding: bedrock.serve_send(response) -> bytes sent or -1 */

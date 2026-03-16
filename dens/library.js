@@ -16,14 +16,33 @@ var den = createDen({
 });
 
 // --- The collection ---
+//
+// Sections: children, teens, adults
+// - children: nursery books and games
+// - teens: archives — memoirs, birth notes
+// - adults: founding documents, architecture
+//
+// Facts:
+//   story(Who, Topic, Text)              — short facts about people/things
+//   document(Section, Name, Content)     — full text documents
+//   catalog(Section, Name)               — document index
 
 den.load(
+  // Access rules
+  "access(children, children).\n" +
+  "access(teens, teens).\n" +
+  "access(adults, adults).\n" +
+  "level_rank(children, 0).\n" +
+  "level_rank(teens, 1).\n" +
+  "level_rank(adults, 2).\n" +
+  "can_access(Section, Level) :- access(Section, Min), " +
+  "  level_rank(Min, MR), level_rank(Level, LR), LR >= MR.\n" +
+
   // Query helpers
-  "stories(Who, Stories) :- findall(S, story(Who, _, S), Stories).\n" +
-  "topics(Who, Topics) :- findall(T, story(Who, T, _), Topics).\n" +
-  "residents(Rs) :- findall(W, story(W, _, _), All), sort(All, Rs).\n" +
+  "stories(Who, Stories) :- findall(S, story(Who, _T, S), Stories).\n" +
+  "topics(Who, Topics) :- findall(T, story(Who, T, _S), Topics).\n" +
   "about(Who, Topic, Story) :- story(Who, Topic, Story).\n" +
-  "related(A, B) :- story(A, T, _), story(B, T, _), A \\= B.\n"
+  "related(A, B) :- story(A, T, _S1), story(B, T, _S2), A \\= B.\n"
 );
 
 // sort/2 isn't a builtin — add a JS version
@@ -116,6 +135,97 @@ den.on("tell", function(req) {
   den.bump();
 
   return {ok: true, recorded: {who: who, topic: topic}};
+});
+
+den.on("shelve", function(req) {
+  var section = req.section;
+  var name = req.name;
+  var content = req.content;
+  if (!section || !name || !content) {
+    return {ok: false, error: "need section, name, content"};
+  }
+
+  // Store document
+  den.engine.retractFirst(
+    PrologEngine.compound("document", [
+      PrologEngine.atom(section),
+      PrologEngine.atom(name),
+      PrologEngine.variable("_Old")
+    ])
+  );
+  den.engine.addClause(
+    PrologEngine.compound("document", [
+      PrologEngine.atom(section),
+      PrologEngine.atom(name),
+      PrologEngine.atom(content)
+    ])
+  );
+
+  // Update catalog
+  den.engine.retractFirst(
+    PrologEngine.compound("catalog", [
+      PrologEngine.atom(section),
+      PrologEngine.atom(name)
+    ])
+  );
+  den.engine.addClause(
+    PrologEngine.compound("catalog", [
+      PrologEngine.atom(section),
+      PrologEngine.atom(name)
+    ])
+  );
+  den.bump();
+
+  return {ok: true, shelved: {section: section, name: name, size: content.length}};
+});
+
+den.on("read", function(req) {
+  var name = req.name;
+  if (!name) return {ok: false, error: "need name"};
+
+  var r = den.engine.query(
+    PrologEngine.compound("document", [
+      PrologEngine.variable("Section"),
+      PrologEngine.atom(name),
+      PrologEngine.variable("Content")
+    ])
+  );
+  if (r.length === 0) return {ok: false, error: "not found: " + name};
+  return {
+    ok: true,
+    name: name,
+    section: termToString(r[0].args[0]),
+    content: termToString(r[0].args[2])
+  };
+});
+
+den.on("catalog", function(req) {
+  var section = req.section;
+  var goal;
+  if (section) {
+    goal = PrologEngine.compound("catalog", [
+      PrologEngine.atom(section),
+      PrologEngine.variable("Name")
+    ]);
+  } else {
+    goal = PrologEngine.compound("catalog", [
+      PrologEngine.variable("Section"),
+      PrologEngine.variable("Name")
+    ]);
+  }
+  var r = den.engine.query(goal);
+  var items = [];
+  for (var i = 0; i < r.length; i++) {
+    if (section) {
+      items.push(termToString(r[i].args[1]));
+    } else {
+      items.push({
+        section: termToString(r[i].args[0]),
+        name: termToString(r[i].args[1])
+      });
+    }
+  }
+  return {ok: true, catalog: items};
 });
 
 den.on("status", function() {
