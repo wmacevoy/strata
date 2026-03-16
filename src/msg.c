@@ -125,6 +125,24 @@ static int send_frame(int fd, const void *buf, size_t len, int timeout_ms) {
     return (int)len;
 }
 
+/* Receive a length-prefixed frame into caller-allocated buffer.
+ * Returns payload length or -1. */
+static int recv_frame_alloc(int fd, char **out, int timeout_ms) {
+    uint32_t net_len;
+    if (read_all(fd, &net_len, 4, timeout_ms) != 0) return -1;
+    uint32_t len = ntohl(net_len);
+    if (len > 16 * 1024 * 1024) return -1; /* 16MB sanity limit */
+    char *buf = malloc(len + 1);
+    if (!buf) return -1;
+    if (len > 0 && read_all(fd, buf, len, timeout_ms) != 0) {
+        free(buf);
+        return -1;
+    }
+    buf[len] = '\0';
+    *out = buf;
+    return (int)len;
+}
+
 /* Receive a length-prefixed frame. Returns payload length or -1. */
 static int recv_frame(int fd, void *buf, size_t cap, int timeout_ms) {
     uint32_t net_len;
@@ -404,6 +422,33 @@ int strata_msg_recv(strata_sock *sock, void *buf, size_t cap, int flags) {
     }
     if (sock->fd < 0) return -1;
     return recv_frame(sock->fd, buf, cap, sock->recv_ms);
+}
+
+int strata_msg_recv_alloc(strata_sock *sock, char **out, int flags) {
+    if (!sock || !out) return -1;
+    *out = NULL;
+    (void)flags;
+    if (sock->proxied) {
+        if (kernel_send_req(OP_RECV, sock->handle, NULL, 0) != 0)
+            return -1;
+        kernel_resp_t resp;
+        if (kernel_recv_resp(&resp) != 0) return -1;
+        if (resp.rc < 0) {
+            if (resp.len > 0) kernel_drain(resp.len);
+            return -1;
+        }
+        char *buf = malloc(resp.len + 1);
+        if (!buf) { kernel_drain(resp.len); return -1; }
+        if (resp.len > 0 && read_all(g_kernel_fd, buf, resp.len, -1) != 0) {
+            free(buf);
+            return -1;
+        }
+        buf[resp.len] = '\0';
+        *out = buf;
+        return resp.rc;
+    }
+    if (sock->fd < 0) return -1;
+    return recv_frame_alloc(sock->fd, out, sock->recv_ms);
 }
 
 void strata_msg_set_timeout(strata_sock *sock, int recv_ms, int send_ms) {

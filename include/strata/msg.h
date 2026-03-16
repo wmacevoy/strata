@@ -51,6 +51,9 @@ int strata_msg_send(strata_sock *sock, const void *buf, size_t len, int flags);
  * Writes at most cap bytes into buf. */
 int strata_msg_recv(strata_sock *sock, void *buf, size_t cap, int flags);
 
+/* Dynamic recv — allocates buffer to fit. Caller frees *out. Returns length or -1. */
+int strata_msg_recv_alloc(strata_sock *sock, char **out, int flags);
+
 /* Set receive timeout in milliseconds (-1 = block forever). */
 void strata_msg_set_timeout(strata_sock *sock, int recv_ms, int send_ms);
 
