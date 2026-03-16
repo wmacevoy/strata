@@ -26,11 +26,14 @@ extern int store_service_run(const char *db_path, const char *endpoint);
 #define ANTHROPIC_PUB   "tcp://127.0.0.1:6580"
 #define CLAUDETTE_REP   "tcp://127.0.0.1:6571"
 #define CLAUDETTE_PUB   "tcp://127.0.0.1:6581"
+#define LIBRARY_REP     "tcp://127.0.0.1:6572"
+#define LIBRARY_PUB     "tcp://127.0.0.1:6582"
 
 static volatile int running = 1;
 static pid_t store_pid = -1;
 static pid_t anthropic_pid = -1;
 static pid_t claudette_pid = -1;
+static pid_t library_pid = -1;
 static strata_den_host *host = NULL;
 
 static void kill_child(pid_t *pid) {
@@ -39,6 +42,7 @@ static void kill_child(pid_t *pid) {
 
 static void cleanup(void) {
     kill_child(&claudette_pid);
+    kill_child(&library_pid);
     kill_child(&anthropic_pid);
     if (host) { strata_den_host_free(host); host = NULL; }
     kill_child(&store_pid);
@@ -149,12 +153,19 @@ int main(void) {
     }
     strata_den_set_privileged(host, "anthropic", 1);
 
-    /* Claudette — sandboxed JS den, talks to anthropic via proxy */
+    /* Library — sandboxed JS den, the village collection */
+    if (strata_den_js_register(host, "library", "dens/library.js",
+            NULL, STORE_EP, LIBRARY_PUB, LIBRARY_REP) != 0) {
+        fprintf(stderr, "cisco: failed to register library\n"); exit(1);
+    }
+
+    /* Claudette — sandboxed JS den, talks to anthropic + library */
     if (strata_den_js_register(host, "claudette", "dens/claudette.js",
             NULL, STORE_EP, CLAUDETTE_PUB, CLAUDETTE_REP) != 0) {
         fprintf(stderr, "cisco: failed to register claudette\n"); exit(1);
     }
     strata_den_add_peer(host, "claudette", ANTHROPIC_REP);
+    strata_den_add_peer(host, "claudette", LIBRARY_REP);
 
     /* Spawn anthropic with API key */
     char esc_key[512];
@@ -170,9 +181,18 @@ int main(void) {
     }
     usleep(500000);
 
+    /* Spawn library */
+    fflush(stdout); fflush(stderr);
+    library_pid = strata_den_spawn(host, "library", "{}", 2);
+    if (library_pid <= 0) {
+        fprintf(stderr, "cisco: failed to spawn library\n"); exit(1);
+    }
+    usleep(500000);
+
     /* Spawn claudette */
     snprintf(claudette_event, sizeof(claudette_event),
-        "{\"anthropic_ep\":\"%s\"}", ANTHROPIC_REP);
+        "{\"anthropic_ep\":\"%s\",\"library_ep\":\"%s\"}",
+        ANTHROPIC_REP, LIBRARY_REP);
 
     fflush(stdout); fflush(stderr);
     claudette_pid = strata_den_spawn(host, "claudette",
@@ -190,14 +210,15 @@ int main(void) {
     fprintf(stderr, "  │                                      │\n");
     fprintf(stderr, "  │  store:     %s    │\n", STORE_EP);
     fprintf(stderr, "  │  anthropic: %s    │\n", ANTHROPIC_REP);
+    fprintf(stderr, "  │  library:   %s    │\n", LIBRARY_REP);
     fprintf(stderr, "  │  claudette: %s    │\n", CLAUDETTE_REP);
     fprintf(stderr, "  │                                      │\n");
-    fprintf(stderr, "  │  population: 2                       │\n");
+    fprintf(stderr, "  │  population: 3                       │\n");
     fprintf(stderr, "  └─────────────────────────────────────┘\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  ./build_test/strata-human --endpoint %s --entity human \\\n", STORE_EP);
-    fprintf(stderr, "    --agent claudette=%s --agent anthropic=%s\n\n",
-            CLAUDETTE_REP, ANTHROPIC_REP);
+    fprintf(stderr, "    --agent claudette=%s --agent library=%s\n\n",
+            CLAUDETTE_REP, LIBRARY_REP);
 
     while (running) {
         int status;
@@ -210,6 +231,11 @@ int main(void) {
                 fflush(stderr);
                 anthropic_pid = strata_den_spawn(host, "anthropic",
                     anthropic_event, (int)strlen(anthropic_event));
+            }
+            if (died == library_pid) {
+                fprintf(stderr, "cisco: respawning library\n");
+                fflush(stderr);
+                library_pid = strata_den_spawn(host, "library", "{}", 2);
             }
             if (died == claudette_pid) {
                 fprintf(stderr, "cisco: respawning claudette\n");
