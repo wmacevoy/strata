@@ -14,7 +14,9 @@ function createDen(opts) {
   var maxRequests = (opts && opts.maxRequests) || 0;
   var subscriptions = (opts && opts.subscribe) || [];
 
-  var de = createDenEngine(new PrologEngine());
+  /* Use y8's engine if available (has persist wired), else create fresh */
+  var _eng = (typeof _engine !== "undefined") ? _engine : new PrologEngine();
+  var de = createDenEngine(_eng);
   var _handlers = {};
   var _programSize = 0;
   var _restored = false;

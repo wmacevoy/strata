@@ -56,6 +56,7 @@ bedrock.db_exec(
 );
 
 function save_message(role, content) {
+  if (!content) return;
   var esc = content.replace(/'/g, "''");
   bedrock.db_exec(
     "INSERT INTO messages (role, content) VALUES ('" + role + "', '" + esc + "')"
@@ -170,8 +171,7 @@ function call_api(messages) {
     else if (smith_ep) available.push(t);
   }
 
-  // Just ask. The vocation handles the key, headers, HTTP.
-  var raw = bedrock.request(JSON.stringify({
+  var req_json = JSON.stringify({
     action: "ask",
     model: model,
     max_tokens: 4096,
@@ -181,7 +181,14 @@ function call_api(messages) {
             "for embedded systems. You work together — Y@ handles logic and inference, " +
             "you bring language and understanding. You live in a strata village as a den. " +
             "Your memory persists as Prolog facts. Be direct, curious, and helpful."
-  }), anthropic_ep);
+  });
+
+  // Retry on proxy race (intermittent TCP timing issue)
+  var raw = null;
+  for (var attempt = 0; attempt < 3; attempt++) {
+    raw = bedrock.request(req_json, anthropic_ep);
+    if (raw) break;
+  }
 
   if (!raw) return {ok: false, error: "anthropic vocation unavailable"};
   try {

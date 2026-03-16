@@ -830,7 +830,12 @@ static void js_child_run(strata_den_def *def,
         strata_sandbox_apply();
 
     /* y8 engine: QuickJS + Prolog + persist + fossilize — all in one */
-    y8_t *engine = y8_open(bedrock.local_db_path[0] ? bedrock.local_db_path : NULL);
+    /* y8 gets its own persist db (separate from bedrock's local_db) */
+    char y8_db_path[280] = {0};
+    if (bedrock.local_db_path[0]) {
+        snprintf(y8_db_path, sizeof(y8_db_path), "%s.y8", bedrock.local_db_path);
+    }
+    y8_t *engine = y8_open(y8_db_path[0] ? y8_db_path : NULL);
     if (!engine) {
         fprintf(stderr, "[js] y8_open failed\n");
         bedrock_teardown(&bedrock);
