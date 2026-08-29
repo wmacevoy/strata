@@ -100,6 +100,30 @@ if(NOT APPLE)
     target_link_libraries(quickjs m)
 endif()
 
+# Shamir secret sharing (vendor/shamir-bf submodule — github.com/wmacevoy/shamir-bf)
+# GF(2^8n) and Z/pZ fields behind one hierarchy, plus the primality search for
+# choosing a modulus. Vendors libbf itself. A sibling checkout also works, for
+# developing the two repos together.
+set(SHAMIR_BF_DIR "" CACHE PATH "Path to a shamir-bf checkout (default: the submodule)")
+if(NOT SHAMIR_BF_DIR)
+    foreach(candidate
+            ${CMAKE_CURRENT_SOURCE_DIR}/vendor/shamir-bf
+            ${CMAKE_CURRENT_SOURCE_DIR}/../shamir-bf)
+        if(EXISTS ${candidate}/CMakeLists.txt)
+            set(SHAMIR_BF_DIR ${candidate})
+            break()
+        endif()
+    endforeach()
+endif()
+if(NOT SHAMIR_BF_DIR)
+    message(FATAL_ERROR
+        "shamir-bf not found. Run:  git submodule update --init vendor/shamir-bf\n"
+        "or point -DSHAMIR_BF_DIR=<path> at a checkout.")
+endif()
+message(STATUS "shamir-bf: ${SHAMIR_BF_DIR}")
+set(SHAMIR_BUILD_TESTS OFF CACHE BOOL "" FORCE)   # shamir-bf runs its own suite
+add_subdirectory(${SHAMIR_BF_DIR} ${CMAKE_BINARY_DIR}/shamir-bf EXCLUDE_FROM_ALL)
+
 # Strata library
 add_library(strata
     src/schema.c
@@ -112,7 +136,6 @@ add_library(strata
     src/blob.c
     src/aead.c
     src/msg.c
-    src/shamir.c
     src/village.c
 )
 target_compile_definitions(strata PRIVATE VILLAGE_NO_MAIN)
@@ -123,7 +146,7 @@ target_include_directories(strata PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/wyatt/native
     ${SQLITE3_INCLUDE_DIR}
 )
-target_link_libraries(strata y8 quickjs tcc prolog_core ${SQLITE3_LIBRARY} sodium_static libcurl_static)
+target_link_libraries(strata y8 quickjs tcc prolog_core shamir ${SQLITE3_LIBRARY} sodium_static libcurl_static)
 
 # Store service
 add_library(store_service_lib OBJECT src/store_service.c)
@@ -302,9 +325,9 @@ target_include_directories(test_claude PRIVATE
 target_link_libraries(test_claude strata libcurl_static)
 add_test(NAME test_claude COMMAND test_claude WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Shamir SSS test
+# Shamir integration test (the algorithm itself is tested in shamir-bf)
 add_executable(test_shamir test/test_shamir.c)
-target_link_libraries(test_shamir strata)
+target_link_libraries(test_shamir strata shamir)
 add_test(NAME test_shamir COMMAND test_shamir)
 
 # Prolog tests

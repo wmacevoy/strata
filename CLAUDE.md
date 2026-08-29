@@ -100,6 +100,7 @@ Secure multi-tenant SCM + agent orchestration. Humans and agents are equal villa
 | test_anthropic.c | Anthropic vocation: init, discover, models, ask (real API call if key available) |
 | test_claude.c | Claude den: lifecycle, status, say (graceful without API key), forget, persistence across restart |
 | test_collaboration.c | Full integration: entity auth, gatekeeper, journeyman pattern |
+| test_shamir.c | Integration only: shamir-bf links and works (the algorithm is tested in shamir-bf) |
 
 ## Database Schema
 
@@ -377,6 +378,7 @@ cmake -B build && cmake --build build && cd build && ctest
 ```
 
 Dependencies: SQLite3.
+Submodules: `vendor/shamir-bf` (Shamir secret sharing over GF(2^8n) or Z/pZ — `git submodule update --init`; a sibling checkout or `-DSHAMIR_BF_DIR=<path>` also works).
 Vendored: libsodium 1.0.20 (AEAD, SHA-256, key derivation), QuickJS (JS engine), TCC (C compiler), libcurl 8.14.1 (HTTP/HTTPS — SecureTransport on macOS, OpenSSL on Linux), Prolog engine (prolog_core + prolog_solver + reactive_core + reactive_prolog, from wyatt/Y@).
 
 ## Key Conventions

@@ -7,3 +7,6 @@
 [submodule "vendor/wyatt"]
 	path = vendor/wyatt
 	url = ../wyatt
+[submodule "vendor/shamir-bf"]
+	path = vendor/shamir-bf
+	url = ../shamir-bf
