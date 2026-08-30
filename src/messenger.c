@@ -15,9 +15,9 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
-#include <zmq.h>
 #include <curl/curl.h>
 
+#include "strata/transport.h"
 #include "strata/aead.h"
 #include "strata/json_util.h"
 
@@ -235,12 +235,12 @@ int messenger_run(const char *endpoint, int timeout) {
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    void *zmq_ctx = zmq_ctx_new();
-    void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
-    zmq_bind(rep, endpoint);
+    strata_sock rep;
+    strata_rep_open(&rep);
+    strata_sock_bind(rep, endpoint);
 
     int recv_timeout = 1000;
-    zmq_setsockopt(rep, ZMQ_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+    strata_sock_set_recv_timeout(rep, recv_timeout);
 
     fprintf(stderr, "messenger: listening on %s  timeout=%ds\n",
             endpoint, http_timeout);
@@ -250,25 +250,24 @@ int messenger_run(const char *endpoint, int timeout) {
     if (!req_buf || !resp_buf) {
         fprintf(stderr, "messenger: malloc failed\n");
         free(req_buf); free(resp_buf);
-        zmq_close(rep); zmq_ctx_destroy(zmq_ctx);
+        strata_sock_close(rep);
         curl_global_cleanup();
         return 1;
     }
 
     while (running) {
-        int rc = strata_zmq_recv(rep, req_buf, MAX_REQUEST_BODY + 4095, 0);
+        int rc = strata_recv(rep, req_buf, MAX_REQUEST_BODY + 4095);
         if (rc < 0) continue;
         req_buf[rc] = '\0';
 
         resp_buf[0] = '\0';
         handle_request(req_buf, rc, resp_buf, RESP_CAP);
-        strata_zmq_send(rep, resp_buf, strlen(resp_buf), 0);
+        strata_send(rep, resp_buf, strlen(resp_buf));
     }
 
     free(req_buf);
     free(resp_buf);
-    zmq_close(rep);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(rep);
     curl_global_cleanup();
     fprintf(stderr, "messenger: shutdown\n");
     return 0;

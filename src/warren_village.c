@@ -14,7 +14,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include <zmq.h>
+#include "strata/transport.h"
 #include <curl/curl.h>
 #include "strata/store.h"
 #include "strata/den.h"
@@ -87,22 +87,22 @@ static void abort_handler(int sig) {
 }
 
 static int wait_for_store(const char *endpoint, int max_retries) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
+    strata_sock sock;
+    strata_req_open(&sock);
     int timeout = 500;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
+    strata_sock_set_recv_timeout(sock, timeout);
+    strata_sock_set_send_timeout(sock, timeout);
     int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
+    strata_sock_set_linger(sock, linger);
+    strata_sock_dial(sock, endpoint);
 
     int ready = 0;
     for (int i = 0; i < max_retries && !ready; i++) {
         usleep(100000);
         const char *probe = "{\"action\":\"init\"}";
-        if (strata_zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+        if (strata_send(sock, probe, strlen(probe)) >= 0) {
             char resp[256];
-            int rc = strata_zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            int rc = strata_recv(sock, resp, sizeof(resp) - 1);
             if (rc > 0) {
                 resp[rc] = '\0';
                 if (strstr(resp, "\"ok\":true")) ready = 1;
@@ -110,8 +110,7 @@ static int wait_for_store(const char *endpoint, int max_retries) {
         }
     }
 
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
+    strata_sock_close(sock);
     return ready;
 }
 

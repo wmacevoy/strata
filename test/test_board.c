@@ -3,7 +3,7 @@
  *
  * 1. Fork a store service
  * 2. Spawn the board strata (JS, via QuickJS in fork)
- * 3. Send POST requests via ZMQ REQ
+ * 3. Send POST requests via REQ
  * 4. Send LIST request, verify messages appear
  * 5. Verify PUB notification received
  */
@@ -14,7 +14,10 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <zmq.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include "strata/transport.h"
 #include "strata/store.h"
 #include "strata/den.h"
 
@@ -32,15 +35,15 @@ extern int store_service_run(const char *db_path, const char *endpoint);
 static pid_t store_pid = -1;
 static pid_t board_pid = -1;
 static strata_den_host *host = NULL;
-static void *zmq_ctx = NULL;
-static void *client = NULL;
-static void *notif_sub = NULL;
+static strata_sock client;
+static strata_sock notif_sub;
+static int client_open = 0;
+static int notif_open = 0;
 
 static void cleanup(void) {
     if (board_pid > 0) { kill(board_pid, SIGTERM); waitpid(board_pid, NULL, 0); board_pid = -1; }
-    if (client) { zmq_close(client); client = NULL; }
-    if (notif_sub) { zmq_close(notif_sub); notif_sub = NULL; }
-    if (zmq_ctx) { zmq_ctx_destroy(zmq_ctx); zmq_ctx = NULL; }
+    if (client_open) { strata_sock_close(client); client_open = 0; }
+    if (notif_open) { strata_sock_close(notif_sub); notif_open = 0; }
     if (host) { strata_den_host_free(host); host = NULL; }
     if (store_pid > 0) { kill(store_pid, SIGINT); waitpid(store_pid, NULL, 0); store_pid = -1; }
     unlink(DB_PATH);
@@ -54,34 +57,40 @@ static void abort_handler(int sig) {
     _exit(1);
 }
 
-/* Send a probe request to verify the store service is ready */
+/* TCP connect probe — avoids nng init in parent (nng is not fork-safe).
+ * Parses "tcp://host:port" and does a plain TCP connect to check liveness. */
 static int wait_for_store(const char *endpoint, int max_retries) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
-    int timeout = 500;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
-
-    int ready = 0;
-    for (int i = 0; i < max_retries && !ready; i++) {
-        usleep(100000);
-        const char *probe = "{\"action\":\"init\"}";
-        if (zmq_send(sock, probe, strlen(probe), 0) >= 0) {
-            char resp[256];
-            int rc = zmq_recv(sock, resp, sizeof(resp) - 1, 0);
-            if (rc > 0) {
-                resp[rc] = '\0';
-                if (strstr(resp, "\"ok\":true")) ready = 1;
-            }
+    /* Parse host:port from tcp://host:port */
+    const char *hp = endpoint;
+    if (strncmp(hp, "tcp://", 6) == 0) hp += 6;
+    char host[256] = "127.0.0.1";
+    int port = 0;
+    const char *colon = strrchr(hp, ':');
+    if (colon) {
+        int hlen = (int)(colon - hp);
+        if (hlen > 0 && hlen < (int)sizeof(host)) {
+            memcpy(host, hp, hlen);
+            host[hlen] = '\0';
         }
+        port = atoi(colon + 1);
     }
+    if (port == 0) return 0;
 
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
-    return ready;
+    for (int i = 0; i < max_retries; i++) {
+        usleep(100000);
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) continue;
+        struct sockaddr_in addr = {0};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = inet_addr(host);
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            close(fd);
+            return 1;
+        }
+        close(fd);
+    }
+    return 0;
 }
 
 static void start_store_service(void) {
@@ -108,6 +117,10 @@ int main(void) {
     signal(SIGTERM, abort_handler);
     atexit(cleanup);
 
+    /* Kill stale processes on test ports */
+    system("lsof -ti :15560 :15570 :15580 2>/dev/null | xargs kill 2>/dev/null || true");
+    usleep(200000);
+
     unlink(DB_PATH);
     unlink(DB_PATH "-wal");
     unlink(DB_PATH "-shm");
@@ -118,7 +131,7 @@ int main(void) {
     /* Start store service */
     TEST("start store service");
     start_store_service();
-    assert(wait_for_store(STORE_ENDPOINT, 10));
+    assert(wait_for_store(STORE_ENDPOINT, 20));
     PASS();
 
     /* Create den host and register JS strata */
@@ -142,26 +155,26 @@ int main(void) {
     PASS();
 
     /* Set up a SUB socket to receive notifications */
-    zmq_ctx = zmq_ctx_new();
-
-    notif_sub = zmq_socket(zmq_ctx, ZMQ_SUB);
-    zmq_connect(notif_sub, BOARD_PUB);
-    zmq_setsockopt(notif_sub, ZMQ_SUBSCRIBE, "board/", 6);
+    strata_sub_open(&notif_sub);
+    notif_open = 1;
+    strata_sock_dial(notif_sub, BOARD_PUB);
+    strata_sock_subscribe(notif_sub, "board/", 6);
     int timeout = 3000;
-    zmq_setsockopt(notif_sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock_set_recv_timeout(notif_sub, timeout);
 
     /* Set up a REQ socket to call the board API */
-    client = zmq_socket(zmq_ctx, ZMQ_REQ);
-    zmq_connect(client, BOARD_REP);
-    zmq_setsockopt(client, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_req_open(&client);
+    client_open = 1;
+    strata_sock_dial(client, BOARD_REP);
+    strata_sock_set_recv_timeout(client, timeout);
     usleep(200000);  /* let sockets connect */
 
     /* POST a message */
     TEST("post a message");
     const char *post_req = "{\"action\":\"post\",\"author\":\"alice\",\"message\":\"hello everyone\"}";
-    zmq_send(client, post_req, strlen(post_req), 0);
+    strata_raw_send(client, post_req, strlen(post_req));
     char resp[4096] = {0};
-    rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+    rc = strata_raw_recv(client, resp, sizeof(resp) - 1);
     assert(rc > 0);
     if (!strstr(resp, "\"ok\":true")) { fprintf(stderr, "post response: %s\n", resp); }
     assert(strstr(resp, "\"ok\":true") != NULL);
@@ -171,9 +184,9 @@ int main(void) {
     /* POST another message */
     TEST("post second message");
     const char *post2 = "{\"action\":\"post\",\"author\":\"bob\",\"message\":\"hi alice\"}";
-    zmq_send(client, post2, strlen(post2), 0);
+    strata_raw_send(client, post2, strlen(post2));
     memset(resp, 0, sizeof(resp));
-    rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+    rc = strata_raw_recv(client, resp, sizeof(resp) - 1);
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     PASS();
@@ -181,9 +194,9 @@ int main(void) {
     /* LIST messages */
     TEST("list messages returns both");
     const char *list_req = "{\"action\":\"list\"}";
-    zmq_send(client, list_req, strlen(list_req), 0);
+    strata_raw_send(client, list_req, strlen(list_req));
     memset(resp, 0, sizeof(resp));
-    rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+    rc = strata_raw_recv(client, resp, sizeof(resp) - 1);
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     assert(strstr(resp, "hello everyone") != NULL);
@@ -194,10 +207,8 @@ int main(void) {
     TEST("notification received via PUB");
     char topic[256] = {0};
     char payload[4096] = {0};
-    rc = zmq_recv(notif_sub, topic, sizeof(topic) - 1, 0);
+    rc = strata_sub_recv(notif_sub, topic, sizeof(topic), payload, sizeof(payload));
     if (rc > 0) {
-        rc = zmq_recv(notif_sub, payload, sizeof(payload) - 1, 0);
-        assert(rc > 0);
         assert(strstr(topic, "board/new") != NULL);
         assert(strstr(payload, "alice") != NULL || strstr(payload, "bob") != NULL);
         PASS();

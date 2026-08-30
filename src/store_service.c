@@ -38,7 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-#include <zmq.h>
+#include "strata/transport.h"
 #include "strata/store.h"
 #include "strata/context.h"
 #include "strata/blob.h"
@@ -393,31 +393,30 @@ int store_service_run(const char *db_path, const char *endpoint) {
         fprintf(stderr, "store_service: AEAD encryption enabled\n");
     }
 
-    void *zmq_ctx = zmq_ctx_new();
-    void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
-    zmq_bind(rep, endpoint);
+    strata_sock rep;
+    strata_rep_open(&rep);
+    strata_sock_bind(rep, endpoint);
 
     if (has_bedrock)
         fprintf(stderr, "store_service: transport encryption enabled\n");
 
     int timeout = 1000;
-    zmq_setsockopt(rep, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock_set_recv_timeout(rep, timeout);
 
     fprintf(stderr, "store_service: listening on %s\n", endpoint);
 
     while (running) {
         char req[8192] = {0};
-        int rc = strata_zmq_recv(rep, req, sizeof(req) - 1, 0);
+        int rc = strata_recv(rep, req, sizeof(req) - 1);
         if (rc < 0) continue;
         req[rc] = '\0';
 
         char resp[16384] = {0};
         handle_request(store, req, rc, resp, sizeof(resp));
-        strata_zmq_send(rep, resp, strlen(resp), 0);
+        strata_send(rep, resp, strlen(resp));
     }
 
-    zmq_close(rep);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(rep);
     strata_store_close(store);
     return 0;
 }

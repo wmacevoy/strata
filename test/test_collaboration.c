@@ -2,14 +2,14 @@
  * Integration test for collaboration & journeyman pattern.
  *
  * Tests:
- * 1. Store service: all operations go through ZMQ (no direct SQLite)
+ * 1. Store service: all operations go through transport (no direct SQLite)
  * 2. Entity registration + token authentication
- * 3. CLI through ZMQ: repo create, role assign, msg post/list/get
- * 4. Gatekeeper den: join request → approval → role assignment
+ * 3. CLI through transport: repo create, role assign, msg post/list/get
+ * 4. Gatekeeper den: join request -> approval -> role assignment
  * 5. Two villagers (alice + builder-bot) collaborate via the atmosphere
  *
  * The key assertion: nobody touches SQLite directly except store_service.
- * Alice and builder-bot both go through ZMQ. Same door.
+ * Alice and builder-bot both go through transport. Same door.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +18,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <zmq.h>
+#include "strata/transport.h"
 
 #include "strata/store.h"
 #include "strata/context.h"
@@ -40,14 +40,13 @@ int store_service_run(const char *db_path, const char *endpoint);
 
 static pid_t store_pid = -1;
 static pid_t gk_pid = -1;
-static void *g_zmq_ctx = NULL;
-static void *g_req_sock = NULL;
+static strata_sock g_req_sock;
+static int g_req_open = 0;
 static strata_den_host *g_host = NULL;
 
 static void cleanup(void) {
     if (gk_pid > 0) { kill(gk_pid, SIGTERM); waitpid(gk_pid, NULL, 0); gk_pid = -1; }
-    if (g_req_sock) { zmq_close(g_req_sock); g_req_sock = NULL; }
-    if (g_zmq_ctx) { zmq_ctx_destroy(g_zmq_ctx); g_zmq_ctx = NULL; }
+    if (g_req_open) { strata_sock_close(g_req_sock); g_req_open = 0; }
     if (g_host) { strata_den_host_free(g_host); g_host = NULL; }
     if (store_pid > 0) { kill(store_pid, SIGINT); waitpid(store_pid, NULL, 0); store_pid = -1; }
     unlink(DB_PATH);
@@ -62,31 +61,26 @@ static void abort_handler(int sig) {
 }
 
 static int wait_for_store(const char *endpoint, int max_retries) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
-    int timeout = 500;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
-
     int ready = 0;
     for (int i = 0; i < max_retries && !ready; i++) {
         usleep(100000);
+        strata_sock sock;
+        if (strata_req_open(&sock) != 0) continue;
+        strata_sock_set_recv_timeout(sock, 500);
+        strata_sock_set_send_timeout(sock, 500);
+        strata_sock_dial(sock, endpoint);
+        usleep(50000);
         const char *probe = "{\"action\":\"init\"}";
-        if (zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+        if (strata_send(sock, probe, strlen(probe)) >= 0) {
             char resp[256];
-            int rc = zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            int rc = strata_recv(sock, resp, sizeof(resp) - 1);
             if (rc > 0) {
                 resp[rc] = '\0';
                 if (strstr(resp, "\"ok\":true")) ready = 1;
             }
         }
+        strata_sock_close(sock);
     }
-
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
     return ready;
 }
 
@@ -120,48 +114,47 @@ static void stop_store(void) {
     }
 }
 
-/* ---- ZMQ request helper ---- */
+/* ---- Transport request helper ---- */
 
 static void connect_store(void) {
-    g_zmq_ctx = zmq_ctx_new();
-    g_req_sock = zmq_socket(g_zmq_ctx, ZMQ_REQ);
+    strata_req_open(&g_req_sock);
+    g_req_open = 1;
     int timeout = 5000;
-    zmq_setsockopt(g_req_sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_connect(g_req_sock, STORE_ENDPOINT);
+    strata_sock_set_recv_timeout(g_req_sock, timeout);
+    strata_sock_dial(g_req_sock, STORE_ENDPOINT);
     usleep(50000);
 }
 
 static void disconnect_store(void) {
-    zmq_close(g_req_sock);
-    zmq_ctx_destroy(g_zmq_ctx);
+    strata_sock_close(g_req_sock);
+    g_req_open = 0;
 }
 
 static int store_request(const char *req_json, char *resp, int resp_cap) {
-    int rc = zmq_send(g_req_sock, req_json, strlen(req_json), 0);
+    int rc = strata_raw_send(g_req_sock, req_json, strlen(req_json));
     if (rc < 0) return -1;
-    rc = zmq_recv(g_req_sock, resp, resp_cap - 1, 0);
+    rc = strata_raw_recv(g_req_sock, resp, resp_cap - 1);
     if (rc < 0) return -1;
     resp[rc] = '\0';
     return rc;
 }
 
-/* ---- Per-request ZMQ (for independent sockets) ---- */
+/* ---- Per-request transport (for independent sockets) ---- */
 
-static int zmq_one_request(const char *endpoint, const char *req_json,
+static int one_request(const char *endpoint, const char *req_json,
                             char *resp, int resp_cap) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
+    strata_sock sock;
+    strata_req_open(&sock);
     int timeout = 5000;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_connect(sock, endpoint);
+    strata_sock_set_recv_timeout(sock, timeout);
+    strata_sock_dial(sock, endpoint);
     usleep(50000);
 
-    zmq_send(sock, req_json, strlen(req_json), 0);
-    int rc = zmq_recv(sock, resp, resp_cap - 1, 0);
+    strata_raw_send(sock, req_json, strlen(req_json));
+    int rc = strata_raw_recv(sock, resp, resp_cap - 1);
     if (rc >= 0) resp[rc] = '\0';
 
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
+    strata_sock_close(sock);
     return rc;
 }
 
@@ -179,7 +172,7 @@ int main(void) {
     printf("test_collaboration\n");
     fflush(stdout);
 
-    /* ---- Phase 1: Store service, all through ZMQ ---- */
+    /* ---- Phase 1: Store service, all through transport ---- */
 
     start_store();
     connect_store();
@@ -187,8 +180,8 @@ int main(void) {
     char resp[16384] = {0};
     int rc;
 
-    /* Create project-alpha repo through ZMQ */
-    TEST("repo create via ZMQ");
+    /* Create project-alpha repo through transport */
+    TEST("repo create via transport");
     rc = store_request(
         "{\"action\":\"repo_create\",\"repo\":\"project-alpha\",\"name\":\"Project Alpha\"}",
         resp, sizeof(resp));
@@ -196,8 +189,8 @@ int main(void) {
     assert(strstr(resp, "\"ok\":true") != NULL);
     PASS();
 
-    /* Create gatekeeper repo through ZMQ */
-    TEST("gatekeeper repo via ZMQ");
+    /* Create gatekeeper repo through transport */
+    TEST("gatekeeper repo via transport");
     rc = store_request(
         "{\"action\":\"repo_create\",\"repo\":\"gatekeeper\",\"name\":\"Gatekeeper\"}",
         resp, sizeof(resp));
@@ -257,9 +250,9 @@ int main(void) {
     assert(strstr(resp, "\"ok\":false") != NULL);
     PASS();
 
-    /* ---- Phase 3: Role assignment + artifact ops via ZMQ ---- */
+    /* ---- Phase 3: Role assignment + artifact ops via transport ---- */
 
-    TEST("assign developer role to alice via ZMQ");
+    TEST("assign developer role to alice via transport");
     rc = store_request(
         "{\"action\":\"role_assign\",\"entity\":\"alice\",\"role\":\"developer\",\"repo\":\"project-alpha\"}",
         resp, sizeof(resp));
@@ -267,7 +260,7 @@ int main(void) {
     assert(strstr(resp, "\"ok\":true") != NULL);
     PASS();
 
-    TEST("assign developer role to builder-bot via ZMQ");
+    TEST("assign developer role to builder-bot via transport");
     rc = store_request(
         "{\"action\":\"role_assign\",\"entity\":\"builder-bot\",\"role\":\"developer\",\"repo\":\"project-alpha\"}",
         resp, sizeof(resp));
@@ -276,7 +269,7 @@ int main(void) {
     PASS();
 
     /* Alice posts a task */
-    TEST("alice posts task artifact via ZMQ");
+    TEST("alice posts task artifact via transport");
     rc = store_request(
         "{\"action\":\"put\",\"repo\":\"project-alpha\",\"type\":\"task\","
         "\"content\":\"implement login page\",\"author\":\"alice\","
@@ -289,7 +282,7 @@ int main(void) {
     PASS();
 
     /* Builder-bot sees it */
-    TEST("builder-bot can list artifacts via ZMQ");
+    TEST("builder-bot can list artifacts via transport");
     rc = store_request(
         "{\"action\":\"list\",\"repo\":\"project-alpha\",\"type\":\"task\",\"entity\":\"builder-bot\"}",
         resp, sizeof(resp));
@@ -299,7 +292,7 @@ int main(void) {
     PASS();
 
     /* Builder-bot posts a result */
-    TEST("builder-bot posts result artifact via ZMQ");
+    TEST("builder-bot posts result artifact via transport");
     rc = store_request(
         "{\"action\":\"put\",\"repo\":\"project-alpha\",\"type\":\"result\","
         "\"content\":\"login page implemented with OAuth\",\"author\":\"builder-bot\","
@@ -310,7 +303,7 @@ int main(void) {
     PASS();
 
     /* Alice sees the result */
-    TEST("alice can list all artifacts via ZMQ");
+    TEST("alice can list all artifacts via transport");
     rc = store_request(
         "{\"action\":\"list\",\"repo\":\"project-alpha\",\"entity\":\"alice\"}",
         resp, sizeof(resp));
@@ -346,7 +339,7 @@ int main(void) {
     /* ---- Phase 5: Journeyman pattern — different roles at different projects ---- */
 
     /* Create project-beta */
-    TEST("create project-beta via ZMQ");
+    TEST("create project-beta via transport");
     rc = store_request(
         "{\"action\":\"repo_create\",\"repo\":\"project-beta\",\"name\":\"Project Beta\"}",
         resp, sizeof(resp));
@@ -418,7 +411,7 @@ int main(void) {
 
     /* Builder-bot requests to join project-beta */
     TEST("builder-bot requests join via gatekeeper");
-    rc = zmq_one_request(GK_REP,
+    rc = one_request(GK_REP,
         "{\"action\":\"request_join\",\"entity\":\"builder-bot\","
         "\"role\":\"developer\",\"project\":\"project-beta\"}",
         resp, sizeof(resp));
@@ -431,7 +424,7 @@ int main(void) {
 
     /* List pending requests */
     TEST("list pending join requests");
-    rc = zmq_one_request(GK_REP,
+    rc = one_request(GK_REP,
         "{\"action\":\"list_requests\",\"status\":\"pending\"}",
         resp, sizeof(resp));
     assert(rc > 0);
@@ -446,7 +439,7 @@ int main(void) {
     snprintf(approve_req, sizeof(approve_req),
         "{\"action\":\"approve_join\",\"request_id\":\"%s\",\"approver\":\"admin\"}",
         request_id);
-    rc = zmq_one_request(GK_REP, approve_req, resp, sizeof(resp));
+    rc = one_request(GK_REP, approve_req, resp, sizeof(resp));
     assert(rc > 0);
     assert(strstr(resp, "\"ok\":true") != NULL);
     PASS();
@@ -481,9 +474,9 @@ int main(void) {
     assert(strstr(resp, "new feature code") != NULL);
     PASS();
 
-    /* ---- Phase 7: Privilege system via ZMQ ---- */
+    /* ---- Phase 7: Privilege system via transport ---- */
 
-    TEST("grant privilege via ZMQ");
+    TEST("grant privilege via transport");
     rc = store_request(
         "{\"action\":\"privilege_grant\",\"entity\":\"alice\",\"privilege\":\"parent\"}",
         resp, sizeof(resp));
@@ -491,7 +484,7 @@ int main(void) {
     assert(strstr(resp, "\"ok\":true") != NULL);
     PASS();
 
-    TEST("check privilege via ZMQ");
+    TEST("check privilege via transport");
     rc = store_request(
         "{\"action\":\"privilege_check\",\"entity\":\"alice\",\"privilege\":\"parent\"}",
         resp, sizeof(resp));

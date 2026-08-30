@@ -65,19 +65,8 @@ int strata_aead_is_sealed(const uint8_t *data, size_t len);
  * Returns 0 on success, -1 if neither is set. */
 int strata_aead_key_from_env(strata_aead_key *key);
 
-/* ------------------------------------------------------------------ */
-/*  ZMQ transport encryption (message-level AEAD)                      */
-/* ------------------------------------------------------------------ */
-
-/* Derive a transport key from bedrock. Returns NULL if no bedrock key. */
+/* Derive a transport key from bedrock. Returns NULL if no bedrock key.
+ * Used by the transport layer for REQ/REP AEAD encryption. */
 strata_aead_key *strata_transport_key(void);
-
-/* Encrypted zmq_send: seals message with AEAD before sending.
- * Falls back to plain send if no transport key. */
-int strata_zmq_send(void *sock, const void *buf, size_t len, int flags);
-
-/* Encrypted zmq_recv: receives and opens AEAD message.
- * Falls back to plain recv if message has no AEAD header. */
-int strata_zmq_recv(void *sock, void *buf, size_t len, int flags);
 
 #endif

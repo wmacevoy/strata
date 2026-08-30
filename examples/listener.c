@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
-#include <zmq.h>
+#include "strata/transport.h"
 
 static volatile int running = 1;
 
@@ -27,32 +27,27 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, sigint_handler);
 
-    void *ctx = zmq_ctx_new();
-    void *sub = zmq_socket(ctx, ZMQ_SUB);
-    zmq_connect(sub, endpoint);
-    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, filter, strlen(filter));
+    strata_sock sub;
+    strata_sub_open(&sub);
+    strata_sock_dial(sub, endpoint);
+    strata_sock_subscribe(sub, filter, strlen(filter));
 
     printf("listening on %s (filter: %s)\n", endpoint, filter);
     printf("press Ctrl+C to stop\n\n");
 
-    int timeout = 1000;
-    zmq_setsockopt(sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock_set_recv_timeout(sub, 1000);
 
     while (running) {
         char topic[512] = {0};
         char payload[4096] = {0};
 
-        int rc = zmq_recv(sub, topic, sizeof(topic) - 1, 0);
+        int rc = strata_sub_recv(sub, topic, sizeof(topic), payload, sizeof(payload));
         if (rc < 0) continue;  /* timeout, check running flag */
-
-        rc = zmq_recv(sub, payload, sizeof(payload) - 1, 0);
-        if (rc < 0) continue;
 
         printf("[%s] %s\n", topic, payload);
     }
 
     printf("\nshutting down\n");
-    zmq_close(sub);
-    zmq_ctx_destroy(ctx);
+    strata_sock_close(sub);
     return 0;
 }

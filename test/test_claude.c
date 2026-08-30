@@ -11,8 +11,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <zmq.h>
 #include <curl/curl.h>
+#include "strata/transport.h"
 #include "strata/store.h"
 #include "strata/den.h"
 
@@ -35,13 +35,12 @@ static pid_t smith_pid = -1;
 static pid_t messenger_pid = -1;
 static pid_t claude_pid = -1;
 static strata_den_host *host = NULL;
-static void *zmq_ctx = NULL;
-static void *client = NULL;
+static strata_sock client;
+static int client_open = 0;
 
 static void cleanup(void) {
     if (claude_pid > 0) { kill(claude_pid, SIGTERM); waitpid(claude_pid, NULL, 0); claude_pid = -1; }
-    if (client) { zmq_close(client); client = NULL; }
-    if (zmq_ctx) { zmq_ctx_destroy(zmq_ctx); zmq_ctx = NULL; }
+    if (client_open) { strata_sock_close(client); client_open = 0; }
     if (host) { strata_den_host_free(host); host = NULL; }
     if (messenger_pid > 0) { kill(messenger_pid, SIGTERM); waitpid(messenger_pid, NULL, 0); messenger_pid = -1; }
     if (smith_pid > 0) { kill(smith_pid, SIGTERM); waitpid(smith_pid, NULL, 0); smith_pid = -1; }
@@ -58,22 +57,19 @@ static void abort_handler(int sig) {
 }
 
 static int wait_for_service(const char *endpoint, int max_retries) {
-    void *ctx = zmq_ctx_new();
-    void *sock = zmq_socket(ctx, ZMQ_REQ);
-    int timeout = 500;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
-    int linger = 0;
-    zmq_setsockopt(sock, ZMQ_LINGER, &linger, sizeof(linger));
-    zmq_connect(sock, endpoint);
+    strata_sock sock;
+    if (strata_req_open(&sock) != 0) return 0;
+    strata_sock_set_recv_timeout(sock, 500);
+    strata_sock_set_send_timeout(sock, 500);
+    strata_sock_dial(sock, endpoint);
 
     int ready = 0;
     for (int i = 0; i < max_retries && !ready; i++) {
         usleep(100000);
         const char *probe = "{\"action\":\"init\"}";
-        if (zmq_send(sock, probe, strlen(probe), 0) >= 0) {
+        if (strata_send(sock, probe, strlen(probe)) >= 0) {
             char resp[256];
-            int rc = zmq_recv(sock, resp, sizeof(resp) - 1, 0);
+            int rc = strata_recv(sock, resp, sizeof(resp) - 1);
             if (rc > 0) {
                 resp[rc] = '\0';
                 if (strstr(resp, "\"ok\":true")) ready = 1;
@@ -81,8 +77,7 @@ static int wait_for_service(const char *endpoint, int max_retries) {
         }
     }
 
-    zmq_close(sock);
-    zmq_ctx_destroy(ctx);
+    strata_sock_close(sock);
     return ready;
 }
 
@@ -162,20 +157,20 @@ int main(void) {
     PASS();
 
     /* Set up client */
-    zmq_ctx = zmq_ctx_new();
-    client = zmq_socket(zmq_ctx, ZMQ_REQ);
+    assert(strata_req_open(&client) == 0);
+    client_open = 1;
     int timeout = 10000;
-    zmq_setsockopt(client, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_connect(client, CLAUDE_REP);
+    strata_sock_set_recv_timeout(client, timeout);
+    strata_sock_dial(client, CLAUDE_REP);
     usleep(200000);
 
     /* Test status */
     TEST("status action");
     {
         const char *req = "{\"action\":\"status\"}";
-        zmq_send(client, req, strlen(req), 0);
+        strata_send(client, req, strlen(req));
         char resp[4096] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = strata_recv(client, resp, sizeof(resp) - 1);
         assert(rc > 0);
         assert(strstr(resp, "\"ok\":true") != NULL);
         assert(strstr(resp, "\"name\":\"claude\"") != NULL);
@@ -187,10 +182,10 @@ int main(void) {
     TEST("say without API key returns error gracefully");
     {
         const char *req = "{\"action\":\"say\",\"from\":\"test\",\"message\":\"hello\"}";
-        zmq_send(client, req, strlen(req), 0);
+        strata_send(client, req, strlen(req));
         char *resp = malloc(1024 * 1024);
         assert(resp);
-        rc = zmq_recv(client, resp, 1024 * 1024 - 1, 0);
+        rc = strata_recv(client, resp, 1024 * 1024 - 1);
         assert(rc > 0);
         resp[rc] = '\0';
         /* Should get an error about API key, not a crash */
@@ -203,9 +198,9 @@ int main(void) {
     TEST("forget clears conversation history");
     {
         const char *req = "{\"action\":\"forget\"}";
-        zmq_send(client, req, strlen(req), 0);
+        strata_send(client, req, strlen(req));
         char resp[1024] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = strata_recv(client, resp, sizeof(resp) - 1);
         assert(rc > 0);
         assert(strstr(resp, "\"ok\":true") != NULL);
         assert(strstr(resp, "cleared") != NULL);
@@ -216,9 +211,9 @@ int main(void) {
     TEST("status shows 0 messages after forget");
     {
         const char *req = "{\"action\":\"status\"}";
-        zmq_send(client, req, strlen(req), 0);
+        strata_send(client, req, strlen(req));
         char resp[4096] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = strata_recv(client, resp, sizeof(resp) - 1);
         assert(rc > 0);
         assert(strstr(resp, "\"conversation_length\":0") != NULL);
     }
@@ -229,13 +224,13 @@ int main(void) {
     {
         /* Send a say to create some conversation state */
         const char *req = "{\"action\":\"say\",\"from\":\"test\",\"message\":\"remember me\"}";
-        zmq_send(client, req, strlen(req), 0);
+        strata_send(client, req, strlen(req));
         char resp[8192] = {0};
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = strata_recv(client, resp, sizeof(resp) - 1);
         assert(rc > 0);
 
         /* Close client, kill den */
-        zmq_close(client); client = NULL;
+        strata_sock_close(client); client_open = 0;
         kill(claude_pid, SIGTERM);
         waitpid(claude_pid, NULL, 0);
         claude_pid = -1;
@@ -248,16 +243,17 @@ int main(void) {
         usleep(500000);
 
         /* Reconnect */
-        client = zmq_socket(zmq_ctx, ZMQ_REQ);
-        zmq_setsockopt(client, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-        zmq_connect(client, CLAUDE_REP);
+        assert(strata_req_open(&client) == 0);
+        client_open = 1;
+        strata_sock_set_recv_timeout(client, timeout);
+        strata_sock_dial(client, CLAUDE_REP);
         usleep(200000);
 
         /* Check status — should show messages from before restart */
         const char *status_req = "{\"action\":\"status\"}";
-        zmq_send(client, status_req, strlen(status_req), 0);
+        strata_send(client, status_req, strlen(status_req));
         memset(resp, 0, sizeof(resp));
-        rc = zmq_recv(client, resp, sizeof(resp) - 1, 0);
+        rc = strata_recv(client, resp, sizeof(resp) - 1);
         assert(rc > 0);
         assert(strstr(resp, "\"ok\":true") != NULL);
         /* conversation_length should be > 0 (messages survived restart) */

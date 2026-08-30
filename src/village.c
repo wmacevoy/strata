@@ -4,7 +4,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include <zmq.h>
+#include "strata/transport.h"
 
 #include "strata/village.h"
 #include "strata/den.h"
@@ -30,52 +30,46 @@ struct strata_relay {
 };
 
 static void req_relay_run(const char *local_rep_ep, const char *remote_req_ep) {
-    void *ctx = zmq_ctx_new();
-    void *rep = zmq_socket(ctx, ZMQ_REP);
-    void *req = zmq_socket(ctx, ZMQ_REQ);
+    strata_sock rep; strata_rep_open(&rep);
+    strata_sock req; strata_req_open(&req);
     int timeout = 5000;
 
-    zmq_bind(rep, local_rep_ep);
-    zmq_connect(req, remote_req_ep);
-    zmq_setsockopt(rep, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_setsockopt(req, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock_bind(rep, local_rep_ep);
+    strata_sock_dial(req, remote_req_ep);
+    strata_sock_set_recv_timeout(rep, timeout);
+    strata_sock_set_recv_timeout(req, timeout);
 
     while (1) {
         char buf[16384];
-        int rc = zmq_recv(rep, buf, sizeof(buf), 0);
+        int rc = strata_raw_recv(rep, buf, sizeof(buf));
         if (rc < 0) continue;
 
-        zmq_send(req, buf, rc, 0);
-        rc = zmq_recv(req, buf, sizeof(buf), 0);
+        strata_raw_send(req, buf, rc);
+        rc = strata_raw_recv(req, buf, sizeof(buf));
         if (rc < 0) {
             const char *err = "{\"ok\":false,\"error\":\"relay timeout\"}";
-            zmq_send(rep, err, strlen(err), 0);
+            strata_raw_send(rep, err, strlen(err));
             continue;
         }
-        zmq_send(rep, buf, rc, 0);
+        strata_raw_send(rep, buf, rc);
     }
 }
 
 static void sub_relay_run(const char *local_pub_ep, const char *remote_sub_ep) {
-    void *ctx = zmq_ctx_new();
-    void *sub = zmq_socket(ctx, ZMQ_SUB);
-    void *pub = zmq_socket(ctx, ZMQ_PUB);
+    strata_sock sub; strata_req_open(&sub);
+    strata_sock pub; strata_rep_open(&pub);
     int timeout = 1000;
 
-    zmq_connect(sub, remote_sub_ep);
-    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, "", 0);
-    zmq_setsockopt(sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_bind(pub, local_pub_ep);
+    strata_sock_dial(sub, remote_sub_ep);
+    strata_sock_subscribe(sub, "", 0);
+    strata_sock_set_recv_timeout(sub, timeout);
+    strata_sock_bind(pub, local_pub_ep);
 
     while (1) {
         char topic[512], payload[8192];
-        int rc = zmq_recv(sub, topic, sizeof(topic), 0);
+        int rc = strata_sub_recv(sub, topic, sizeof(topic), payload, sizeof(payload));
         if (rc < 0) continue;
-        int tlen = rc;
-        rc = zmq_recv(sub, payload, sizeof(payload), 0);
-        if (rc < 0) continue;
-        zmq_send(pub, topic, tlen, ZMQ_SNDMORE);
-        zmq_send(pub, payload, rc, 0);
+        strata_pub_send(pub, topic, payload);
     }
 }
 
@@ -145,12 +139,11 @@ int strata_remote_clone(strata_den_host *host, const char *den_name,
         }
     }
 
-    void *zmq_ctx = zmq_ctx_new();
-    void *req = zmq_socket(zmq_ctx, ZMQ_REQ);
+    strata_sock req; strata_req_open(&req);
 
     int timeout = 10000;
-    zmq_setsockopt(req, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
-    zmq_connect(req, village_endpoint);
+    strata_sock_set_recv_timeout(req, timeout);
+    strata_sock_dial(req, village_endpoint);
 
     /* Frame 0: JSON header */
     char header[2048];
@@ -163,24 +156,33 @@ int strata_remote_clone(strata_den_host *host, const char *den_name,
         def->mode == STRATA_MODE_JS ? "js" : "native",
         origin_req_endpoint ? origin_req_endpoint : "");
 
-    zmq_send(req, header, strlen(header), ZMQ_SNDMORE);
+    /* Send 3 frames: header + source + event */
+    const char *parts[3];
+    size_t lens[3];
 
-    /* Frame 1: den source (text) */
+    parts[0] = header;
+    lens[0] = strlen(header);
+
     if (def->mode == STRATA_MODE_JS) {
-        zmq_send(req, def->js_source, strlen(def->js_source), ZMQ_SNDMORE);
+        parts[1] = def->js_source;
+        lens[1] = strlen(def->js_source);
     } else {
-        zmq_send(req, def->c_source, def->c_source_len, ZMQ_SNDMORE);
+        parts[1] = def->c_source;
+        lens[1] = def->c_source_len;
     }
 
-    /* Frame 2: event JSON */
-    zmq_send(req, event_json ? event_json : "{}", event_json ? event_len : 2, 0);
+    const char *ev = event_json ? event_json : "{}";
+    int ev_len = event_json ? event_len : 2;
+    parts[2] = ev;
+    lens[2] = ev_len;
+
+    strata_multipart_send(req, parts, lens, 3);
 
     /* Receive response */
     char resp[4096];
-    int rc = zmq_recv(req, resp, sizeof(resp) - 1, 0);
+    int rc = strata_raw_recv(req, resp, sizeof(resp) - 1);
 
-    zmq_close(req);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(req);
 
     if (rc < 0) {
         result->ok = 0;
@@ -223,41 +225,39 @@ typedef struct {
 static spawned_entry spawned[MAX_SPAWNED];
 static int spawned_count = 0;
 
-static int handle_clone_request(void *rep_sock) {
-    /* Frame 0: JSON header */
-    char header[4096];
-    int hlen = zmq_recv(rep_sock, header, sizeof(header) - 1, 0);
-    if (hlen < 0) return -1;
-    header[hlen] = '\0';
-
-    int more = 0;
-    size_t more_size = sizeof(more);
-    zmq_getsockopt(rep_sock, ZMQ_RCVMORE, &more, &more_size);
-    if (!more) {
-        const char *err = "{\"ok\":false,\"error\":\"missing payload frame\"}";
-        zmq_send(rep_sock, err, strlen(err), 0);
-        return -1;
-    }
-
-    /* Frame 1: den binary */
+static int handle_clone_request(strata_sock rep_sock) {
+    /* Receive up to 3 frames via multipart */
     size_t payload_cap = 2 * 1024 * 1024;
     unsigned char *payload = malloc(payload_cap);
-    int plen = zmq_recv(rep_sock, payload, payload_cap, 0);
-    if (plen < 0) {
+    char header[4096];
+    char event[8192] = "{}";
+
+    char *bufs[3] = { header, (char *)payload, event };
+    size_t caps[3] = { sizeof(header) - 1, payload_cap, sizeof(event) - 1 };
+    size_t lens[3] = { 0, 0, 0 };
+
+    int nframes = strata_multipart_recv(rep_sock, bufs, lens, caps, 3);
+    if (nframes < 1) {
         free(payload);
-        const char *err = "{\"ok\":false,\"error\":\"payload recv failed\"}";
-        zmq_send(rep_sock, err, strlen(err), 0);
+        return -1;
+    }
+    header[lens[0]] = '\0';
+
+    if (nframes < 2) {
+        free(payload);
+        const char *err = "{\"ok\":false,\"error\":\"missing payload frame\"}";
+        strata_raw_send(rep_sock, err, strlen(err));
         return -1;
     }
 
+    (void)lens[0]; /* hlen consumed via null-termination above */
+    int plen = (int)lens[1];
+
     /* Frame 2: event JSON */
-    char event[8192] = "{}";
     int event_len = 2;
-    zmq_getsockopt(rep_sock, ZMQ_RCVMORE, &more, &more_size);
-    if (more) {
-        event_len = zmq_recv(rep_sock, event, sizeof(event) - 1, 0);
-        if (event_len < 0) event_len = 2;
-        else event[event_len] = '\0';
+    if (nframes >= 3 && lens[2] > 0) {
+        event_len = (int)lens[2];
+        event[event_len] = '\0';
     }
 
     /* Parse header */
@@ -305,7 +305,7 @@ static int handle_clone_request(void *rep_sock) {
 
     if (rc != 0) {
         const char *err = "{\"ok\":false,\"error\":\"register failed\"}";
-        zmq_send(rep_sock, err, strlen(err), 0);
+        strata_raw_send(rep_sock, err, strlen(err));
         strata_den_host_free(host);
         if (relay) strata_relay_destroy(relay);
         return -1;
@@ -333,7 +333,7 @@ static int handle_clone_request(void *rep_sock) {
         if (relay) strata_relay_destroy(relay);
     }
 
-    zmq_send(rep_sock, resp, strlen(resp), 0);
+    strata_raw_send(rep_sock, resp, strlen(resp));
     return pid > 0 ? 0 : -1;
 }
 
@@ -341,13 +341,12 @@ int strata_village_run(const char *listen_endpoint) {
     signal(SIGINT, village_sigint);
     signal(SIGTERM, village_sigint);
 
-    void *zmq_ctx = zmq_ctx_new();
-    void *rep = zmq_socket(zmq_ctx, ZMQ_REP);
+    strata_sock rep; strata_rep_open(&rep);
 
-    zmq_bind(rep, listen_endpoint);
+    strata_sock_bind(rep, listen_endpoint);
 
     int timeout = 1000;
-    zmq_setsockopt(rep, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock_set_recv_timeout(rep, timeout);
 
     fprintf(stderr, "village: listening on %s\n", listen_endpoint);
 
@@ -365,8 +364,7 @@ int strata_village_run(const char *listen_endpoint) {
         if (spawned[i].host) strata_den_host_free(spawned[i].host);
     }
 
-    zmq_close(rep);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(rep);
     return 0;
 }
 

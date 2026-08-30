@@ -3,17 +3,17 @@
  *
  * Two modes:
  *   --db <path>       Bootstrap mode (init only). Direct SQLite for schema creation.
- *   --endpoint <url>  Villager mode. All commands via ZMQ REQ/REP to store_service.
+ *   --endpoint <url>  Villager mode. All commands via REQ/REP to store_service.
  *
  * All commands except 'init' require --endpoint. The CLI talks to the store
- * service over ZMQ like every other villager. No direct database access.
+ * service over transport like every other villager. No direct database access.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
-#include <zmq.h>
+#include "strata/transport.h"
 #include "strata/store.h"
 #include "strata/json_util.h"
 
@@ -58,14 +58,14 @@ static void free_csv(char **arr, int count) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ZMQ helpers                                                        */
+/*  Transport helpers                                                  */
 /* ------------------------------------------------------------------ */
 
-static int zmq_do_request(void *req_sock, const char *request,
-                          char *resp, int resp_cap) {
-    int rc = strata_zmq_send(req_sock, request, strlen(request), 0);
+static int do_request(strata_sock req_sock, const char *request,
+                      char *resp, int resp_cap) {
+    int rc = strata_send(req_sock, request, strlen(request));
     if (rc < 0) return -1;
-    rc = strata_zmq_recv(req_sock, resp, resp_cap - 1, 0);
+    rc = strata_recv(req_sock, resp, resp_cap - 1);
     if (rc < 0) return -1;
     resp[rc] = '\0';
     return rc;
@@ -102,10 +102,10 @@ static int cmd_init(cli_opts *opts) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ZMQ commands: everything goes through the store service            */
+/*  Commands: everything goes through the store service                */
 /* ------------------------------------------------------------------ */
 
-static int cmd_repo_create(void *sock, cli_opts *opts) {
+static int cmd_repo_create(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata --endpoint <url> repo create <repo_id> <name>\n");
         return 1;
@@ -116,14 +116,14 @@ static int cmd_repo_create(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_role_assign(void *sock, cli_opts *opts) {
+static int cmd_role_assign(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 3) {
         fprintf(stderr, "usage: strata --endpoint <url> role assign <entity> <role> <repo_id>\n");
         return 1;
@@ -134,14 +134,14 @@ static int cmd_role_assign(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1], opts->argv[2]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_role_revoke(void *sock, cli_opts *opts) {
+static int cmd_role_revoke(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 3) {
         fprintf(stderr, "usage: strata --endpoint <url> role revoke <entity> <role> <repo_id>\n");
         return 1;
@@ -152,14 +152,14 @@ static int cmd_role_revoke(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1], opts->argv[2]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_msg_post(void *sock, cli_opts *opts) {
+static int cmd_msg_post(strata_sock sock, cli_opts *opts) {
     if (!opts->entity) { fprintf(stderr, "--entity required\n"); return 1; }
     if (opts->argc < 3) {
         fprintf(stderr, "usage: strata --endpoint <url> --entity <id> msg post <repo> <type> <content> --roles r1,r2\n");
@@ -179,14 +179,14 @@ static int cmd_msg_post(void *sock, cli_opts *opts) {
     free_csv(roles, nroles);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_msg_list(void *sock, cli_opts *opts) {
+static int cmd_msg_list(strata_sock sock, cli_opts *opts) {
     if (!opts->entity) { fprintf(stderr, "--entity required\n"); return 1; }
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata --endpoint <url> --entity <id> msg list <repo> [--type <type>]\n");
@@ -203,14 +203,14 @@ static int cmd_msg_list(void *sock, cli_opts *opts) {
             opts->argv[0], opts->entity);
 
     char resp[16384];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_msg_get(void *sock, cli_opts *opts) {
+static int cmd_msg_get(strata_sock sock, cli_opts *opts) {
     if (!opts->entity) { fprintf(stderr, "--entity required\n"); return 1; }
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata --endpoint <url> --entity <id> msg get <artifact_id>\n");
@@ -222,14 +222,14 @@ static int cmd_msg_get(void *sock, cli_opts *opts) {
         opts->argv[0], opts->entity);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_put(void *sock, cli_opts *opts) {
+static int cmd_blob_put(strata_sock sock, cli_opts *opts) {
     if (!opts->entity) { fprintf(stderr, "--entity required\n"); return 1; }
 
     const char *content = NULL;
@@ -272,14 +272,14 @@ static int cmd_blob_put(void *sock, cli_opts *opts) {
     free_csv(roles, nroles);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_get(void *sock, cli_opts *opts) {
+static int cmd_blob_get(strata_sock sock, cli_opts *opts) {
     if (!opts->entity) { fprintf(stderr, "--entity required\n"); return 1; }
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata --endpoint <url> --entity <id> blob get <blob_id>\n");
@@ -291,14 +291,14 @@ static int cmd_blob_get(void *sock, cli_opts *opts) {
         opts->argv[0], opts->entity);
 
     char resp[8192];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_find(void *sock, cli_opts *opts) {
+static int cmd_blob_find(strata_sock sock, cli_opts *opts) {
     if (!opts->entity) { fprintf(stderr, "--entity required\n"); return 1; }
 
     char *tags[16];
@@ -312,14 +312,14 @@ static int cmd_blob_find(void *sock, cli_opts *opts) {
     free_csv(tags, ntags);
 
     char resp[16384];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_tag(void *sock, cli_opts *opts) {
+static int cmd_blob_tag(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata --endpoint <url> blob tag <blob_id> <tag>\n");
         return 1;
@@ -330,14 +330,14 @@ static int cmd_blob_tag(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_untag(void *sock, cli_opts *opts) {
+static int cmd_blob_untag(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata --endpoint <url> blob untag <blob_id> <tag>\n");
         return 1;
@@ -348,14 +348,14 @@ static int cmd_blob_untag(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_blob_tags(void *sock, cli_opts *opts) {
+static int cmd_blob_tags(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata --endpoint <url> blob tags <blob_id>\n");
         return 1;
@@ -365,14 +365,14 @@ static int cmd_blob_tags(void *sock, cli_opts *opts) {
         "{\"action\":\"blob_tags\",\"id\":\"%s\"}", opts->argv[0]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_privilege_grant(void *sock, cli_opts *opts) {
+static int cmd_privilege_grant(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata --endpoint <url> privilege grant <entity> <privilege>\n");
         return 1;
@@ -383,14 +383,14 @@ static int cmd_privilege_grant(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_privilege_revoke(void *sock, cli_opts *opts) {
+static int cmd_privilege_revoke(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata --endpoint <url> privilege revoke <entity> <privilege>\n");
         return 1;
@@ -401,14 +401,14 @@ static int cmd_privilege_revoke(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_privilege_check(void *sock, cli_opts *opts) {
+static int cmd_privilege_check(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata --endpoint <url> privilege check <entity> <privilege>\n");
         return 1;
@@ -419,7 +419,7 @@ static int cmd_privilege_check(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
@@ -430,7 +430,7 @@ static int cmd_privilege_check(void *sock, cli_opts *opts) {
 /*  Entity commands                                                    */
 /* ------------------------------------------------------------------ */
 
-static int cmd_entity_register(void *sock, cli_opts *opts) {
+static int cmd_entity_register(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 1) {
         fprintf(stderr, "usage: strata --endpoint <url> entity register <entity_id>\n");
         return 1;
@@ -440,14 +440,14 @@ static int cmd_entity_register(void *sock, cli_opts *opts) {
         "{\"action\":\"entity_register\",\"entity\":\"%s\"}", opts->argv[0]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
     return strstr(resp, "\"ok\":true") ? 0 : 1;
 }
 
-static int cmd_entity_auth(void *sock, cli_opts *opts) {
+static int cmd_entity_auth(strata_sock sock, cli_opts *opts) {
     if (opts->argc < 2) {
         fprintf(stderr, "usage: strata --endpoint <url> entity auth <entity_id> <token>\n");
         return 1;
@@ -458,7 +458,7 @@ static int cmd_entity_auth(void *sock, cli_opts *opts) {
         opts->argv[0], opts->argv[1]);
 
     char resp[4096];
-    if (zmq_do_request(sock, req, resp, sizeof(resp)) < 0) {
+    if (do_request(sock, req, resp, sizeof(resp)) < 0) {
         fprintf(stderr, "timeout\n"); return 1;
     }
     printf("%s\n", resp);
@@ -479,22 +479,16 @@ static int cmd_listen(cli_opts *opts) {
     signal(SIGINT, listen_sigint);
     signal(SIGTERM, listen_sigint);
 
-    void *ctx = zmq_ctx_new();
-    void *sub = zmq_socket(ctx, ZMQ_SUB);
-    zmq_connect(sub, opts->endpoint);
-    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, topic, strlen(topic));
-
-    int timeout = 1000;
-    zmq_setsockopt(sub, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    strata_sock sub;
+    if (strata_sub_open(&sub) != 0) { fprintf(stderr, "cannot open SUB socket\n"); return 1; }
+    strata_sock_dial(sub, opts->endpoint);
+    strata_sock_subscribe(sub, topic, strlen(topic));
+    strata_sock_set_recv_timeout(sub, 1000);
 
     while (listen_running) {
         char topic_buf[512] = {0}, payload[8192] = {0};
-        int rc = zmq_recv(sub, topic_buf, sizeof(topic_buf) - 1, 0);
+        int rc = strata_sub_recv(sub, topic_buf, sizeof(topic_buf), payload, sizeof(payload));
         if (rc < 0) continue;
-        topic_buf[rc] = '\0';
-        rc = zmq_recv(sub, payload, sizeof(payload) - 1, 0);
-        if (rc < 0) continue;
-        payload[rc] = '\0';
 
         if (opts->plain)
             printf("[%s] %s\n", topic_buf, payload);
@@ -503,8 +497,7 @@ static int cmd_listen(cli_opts *opts) {
         fflush(stdout);
     }
 
-    zmq_close(sub);
-    zmq_ctx_destroy(ctx);
+    strata_sock_close(sub);
     return 0;
 }
 
@@ -626,16 +619,16 @@ int main(int argc, char **argv) {
         return cmd_listen(&opts);
     }
 
-    /* All other commands: ZMQ REQ/REP to store service */
+    /* All other commands: REQ/REP to store service */
     if (!opts.endpoint) {
         fprintf(stderr, "--endpoint required (use --db only for init)\n");
         return 1;
     }
 
-    void *zmq_ctx = zmq_ctx_new();
-    void *req = zmq_socket(zmq_ctx, ZMQ_REQ);
-    zmq_setsockopt(req, ZMQ_RCVTIMEO, &opts.timeout_ms, sizeof(opts.timeout_ms));
-    zmq_connect(req, opts.endpoint);
+    strata_sock req;
+    if (strata_req_open(&req) != 0) { fprintf(stderr, "cannot open REQ socket\n"); return 1; }
+    strata_sock_set_recv_timeout(req, opts.timeout_ms);
+    strata_sock_dial(req, opts.endpoint);
 
     int rc = 1;
     if (strcmp(fullcmd, "repo_create") == 0)        rc = cmd_repo_create(req, &opts);
@@ -657,7 +650,6 @@ int main(int argc, char **argv) {
     else if (strcmp(fullcmd, "entity_auth") == 0)      rc = cmd_entity_auth(req, &opts);
     else { fprintf(stderr, "unknown command: %s\n", fullcmd); usage(); rc = 1; }
 
-    zmq_close(req);
-    zmq_ctx_destroy(zmq_ctx);
+    strata_sock_close(req);
     return rc;
 }
